@@ -1,0 +1,18 @@
+[project]
+name = "comfyui-slapshot"
+version = "0.1.0"
+description = "Slapshot rotoscoping node for ComfyUI — submits video jobs to the Slapshot API and reports completion."
+license = { file = "LICENSE" }
+dependencies = ["requests"]
+
+[[project.authors]]
+name = "Slapshot"
+email = "amritansh@slapshot.ai"
+
+[project.urls]
+Repository = "https://github.com/slapshot-ai/comfyui-slapshot"
+
+[tool.comfy]
+PublisherId = "slapshot"
+DisplayName = "Slapshot Rotoscoping"
+Icon = ""
