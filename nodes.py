@@ -10,6 +10,7 @@ import os
 import re
 import time
 import json
+import threading
 import requests
 
 BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.work").rstrip("/")
@@ -52,6 +53,7 @@ class SlapshotRotoscopingNode:
                     "default": "",
                     "multiline": False,
                     "placeholder": "your-api-key",
+                    "password": True,
                 }),
                 "output_s3_path": ("STRING", {
                     "default": "",
@@ -149,10 +151,8 @@ class SlapshotRotoscopingNode:
             )
         print(f"[RotoscopingMasks] Job submitted. job_id={job_id}")
 
-        # ── Poll for completion ───────────────────────────────────────────────
+        # ── Poll for completion (background thread) ───────────────────────────
         status_url = f"{BASE_URL}/api/jobs/{job_id}"
-        poll_num   = 0
-        poll_start = time.monotonic()
 
         try:
             from comfy.utils import ProgressBar
@@ -160,99 +160,119 @@ class SlapshotRotoscopingNode:
         except ImportError:
             pbar = None
 
-        while True:
-            time.sleep(POLL_INTERVAL_SECONDS)
-            poll_num += 1
+        done_event = threading.Event()
+        result_box: dict = {}
 
-            elapsed = time.monotonic() - poll_start
-            if elapsed > MAX_POLL_SECONDS:
-                raise RuntimeError(
-                    f"[RotoscopingMasks] Job {job_id} did not complete within 5 hours "
-                    f"({poll_num} polls). Giving up."
-                )
+        def _poll():
+            poll_num   = 0
+            poll_start = time.monotonic()
 
-            print(f"[RotoscopingMasks] Poll #{poll_num}: GET {status_url}")
-            try:
-                poll_resp = requests.get(
-                    status_url,
-                    headers=_headers(api_key),
-                    timeout=REQUEST_TIMEOUT,
-                )
+            while True:
+                time.sleep(POLL_INTERVAL_SECONDS)
+                poll_num += 1
+
+                elapsed = time.monotonic() - poll_start
+                if elapsed > MAX_POLL_SECONDS:
+                    result_box["error"] = RuntimeError(
+                        f"[RotoscopingMasks] Job {job_id} did not complete within 5 hours "
+                        f"({poll_num} polls). Giving up."
+                    )
+                    done_event.set()
+                    return
+
+                print(f"[RotoscopingMasks] Poll #{poll_num}: GET {status_url}")
+                try:
+                    poll_resp = requests.get(
+                        status_url,
+                        headers=_headers(api_key),
+                        timeout=REQUEST_TIMEOUT,
+                    )
+                    print(
+                        f"[RotoscopingMasks] Poll #{poll_num} response: "
+                        f"status={poll_resp.status_code} "
+                        f"elapsed={poll_resp.elapsed.total_seconds():.2f}s "
+                        f"body={poll_resp.text[:500]}"
+                    )
+                except requests.exceptions.RequestException as e:
+                    print(f"[RotoscopingMasks] Network error on poll #{poll_num} (will retry): {type(e).__name__}: {e}")
+                    continue
+
+                if poll_resp.status_code == 429:
+                    print("[RotoscopingMasks] Rate limited — backing off one extra minute...")
+                    time.sleep(60)
+                    continue
+
+                try:
+                    poll_resp.raise_for_status()
+                except requests.exceptions.HTTPError:
+                    code = poll_resp.status_code
+                    print(
+                        f"[RotoscopingMasks] Poll #{poll_num} HTTP error: "
+                        f"url={poll_resp.url} status={code} body={poll_resp.text[:500]}"
+                    )
+                    if code == 401:
+                        result_box["error"] = PermissionError("[RotoscopingMasks] Invalid API key (401).")
+                    else:
+                        result_box["error"] = RuntimeError(
+                            f"[RotoscopingMasks] Status check failed ({code}): {poll_resp.text[:300]}"
+                        )
+                    done_event.set()
+                    return
+
+                data             = poll_resp.json()
+                percent_complete = data.get("percent_complete", 0)
+                total            = data.get("total", 0)
+                total_pending    = data.get("total_pending", 0)
+                total_running    = data.get("total_running", 0)
+                total_completed  = data.get("total_completed", 0)
+                total_failed     = data.get("total_failed", 0)
+                total_cancelled  = data.get("total_cancelled", 0)
+
+                if pbar is not None:
+                    pbar.update_absolute(percent_complete)
+
                 print(
-                    f"[RotoscopingMasks] Poll #{poll_num} response: "
-                    f"status={poll_resp.status_code} "
-                    f"elapsed={poll_resp.elapsed.total_seconds():.2f}s "
-                    f"body={poll_resp.text[:500]}"
-                )
-            except requests.exceptions.RequestException as e:
-                print(f"[RotoscopingMasks] Network error on poll #{poll_num} (will retry): {type(e).__name__}: {e}")
-                continue
-
-            if poll_resp.status_code == 429:
-                print("[RotoscopingMasks] Rate limited — backing off one extra minute...")
-                time.sleep(60)
-                continue
-
-            try:
-                poll_resp.raise_for_status()
-            except requests.exceptions.HTTPError:
-                code = poll_resp.status_code
-                print(
-                    f"[RotoscopingMasks] Poll #{poll_num} HTTP error: "
-                    f"url={poll_resp.url} status={code} body={poll_resp.text[:500]}"
-                )
-                if code == 401:
-                    raise PermissionError("[RotoscopingMasks] Invalid API key (401).")
-                raise RuntimeError(
-                    f"[RotoscopingMasks] Status check failed ({code}): {poll_resp.text[:300]}"
+                    f"[RotoscopingMasks] Poll #{poll_num}: "
+                    f"{percent_complete}% complete — "
+                    f"total={total} pending={total_pending} running={total_running} "
+                    f"completed={total_completed} failed={total_failed} cancelled={total_cancelled}"
                 )
 
-            data             = poll_resp.json()
-            percent_complete = data.get("percent_complete", 0)
-            total            = data.get("total", 0)
-            total_pending    = data.get("total_pending", 0)
-            total_running    = data.get("total_running", 0)
-            total_completed  = data.get("total_completed", 0)
-            total_failed     = data.get("total_failed", 0)
-            total_cancelled  = data.get("total_cancelled", 0)
+                if total > 0 and total_pending == 0 and total_running == 0:
+                    if total_completed == 0:
+                        result_box["error"] = RuntimeError(
+                            f"[RotoscopingMasks] Job failed — "
+                            f"{total_failed} failed, {total_cancelled} cancelled out of {total} total."
+                        )
+                        done_event.set()
+                        return
 
-            if pbar is not None:
-                pbar.update_absolute(percent_complete)
-
-            print(
-                f"[RotoscopingMasks] Poll #{poll_num}: "
-                f"{percent_complete}% complete — "
-                f"total={total} pending={total_pending} running={total_running} "
-                f"completed={total_completed} failed={total_failed} cancelled={total_cancelled}"
-            )
-
-            if total > 0 and total_pending == 0 and total_running == 0:
-                if total_completed == 0:
                     summary = {
-                        "status": "error",
-                        "message": "No tasks completed.",
+                        "status": "complete" if total_completed == total else "partial",
+                        "message": "Check your email for the output path.",
+                        "percent_complete": percent_complete,
                         "total": total,
+                        "total_completed": total_completed,
                         "total_failed": total_failed,
                         "total_cancelled": total_cancelled,
                     }
-                    raise RuntimeError(
-                        f"[RotoscopingMasks] Job failed — "
-                        f"{total_failed} failed, {total_cancelled} cancelled out of {total} total.\n"
-                        + json.dumps(summary, indent=2)
-                    )
+                    result_box["value"] = summary
+                    done_event.set()
+                    return
 
-                summary = {
-                    "status": "complete" if total_completed == total else "partial",
-                    "message": "Check your email for the output path.",
-                    "percent_complete": percent_complete,
-                    "total": total,
-                    "total_completed": total_completed,
-                    "total_failed": total_failed,
-                    "total_cancelled": total_cancelled,
-                }
-                display = json.dumps(summary, indent=2)
-                print(f"[RotoscopingMasks] Done:\n{display}")
-                return {"ui": {"text": [display]}, "result": (display,)}
+        t = threading.Thread(target=_poll, daemon=True)
+        t.start()
+
+        # Wait in short increments so ComfyUI can process interrupts/signals.
+        while not done_event.wait(timeout=5):
+            pass
+
+        if "error" in result_box:
+            raise result_box["error"]
+
+        display = json.dumps(result_box["value"], indent=2)
+        print(f"[RotoscopingMasks] Done:\n{display}")
+        return {"ui": {"text": [display]}, "result": (display,)}
 
 
 # ── Registration ──────────────────────────────────────────────────────────────

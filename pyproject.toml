@@ -15,4 +15,4 @@ Repository = "https://github.com/slapshot-ai/comfyui-slapshot"
 [tool.comfy]
 PublisherId = "slapshot"
 DisplayName = "Slapshot Rotoscoping"
-Icon = ""
+Icon = "https://slapshot.ai/icon.png"
