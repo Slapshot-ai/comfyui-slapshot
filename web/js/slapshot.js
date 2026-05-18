@@ -29,6 +29,23 @@ app.registerExtension({
             widget.inputEl.readOnly = true;
             widget.inputEl.style.opacity = 0.7;
             widget.serialize = false;
+
+            const dlBtn = this.addWidget("button", "Download result", null, () => {
+                const url = this._slapshotDownloadUrl;
+                if (!url) {
+                    alert("No download URL yet — run the node and wait for it to finish.");
+                    return;
+                }
+                const a = document.createElement("a");
+                a.href = url;
+                a.target = "_blank";
+                a.rel = "noopener";
+                a.download = "";
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+            });
+            dlBtn.serialize = false;
         };
 
         const onExecuted = nodeType.prototype.onExecuted;
@@ -40,6 +57,10 @@ app.registerExtension({
                 this.setSize(this.computeSize());
                 app.graph.setDirtyCanvas(true);
             }
+            const url = Array.isArray(message?.download_url)
+                ? message.download_url[0]
+                : message?.download_url;
+            if (url) this._slapshotDownloadUrl = url;
         };
     },
 });

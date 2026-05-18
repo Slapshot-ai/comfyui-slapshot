@@ -1,22 +1,24 @@
 """
 Slapshot Rotoscoping Node
 =========================
-Submits a rotoscoping job for a video stored in S3, polls until complete,
-and reports the result. Output is delivered via email — the node confirms
-completion with a message to check email for the output path.
+Submits a rotoscoping job for a ComfyUI VIDEO input plus zero-or-more MASK
+inputs. Inputs are uploaded to Slapshot via pre-signed PUT URLs, the job is
+polled until complete, and a download URL is fetched and surfaced to the UI
+so the user can click a button to retrieve the result.
 """
 
 import os
-import re
 import time
 import json
 import threading
+import tempfile
 import requests
 
 BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.work").rstrip("/")
 
 POLL_INTERVAL_SECONDS = 60
 REQUEST_TIMEOUT = 30
+UPLOAD_TIMEOUT = 600  # 10 minutes per file
 MAX_POLL_SECONDS = 5 * 60 * 60  # 5 hours
 
 
@@ -27,11 +29,92 @@ def _headers(api_key: str) -> dict:
     }
 
 
+def _presign_upload(api_key: str, filename: str) -> dict:
+    url = f"{BASE_URL}/api/uploads"
+    resp = requests.post(
+        url,
+        json={"filename": filename},
+        headers=_headers(api_key),
+        timeout=REQUEST_TIMEOUT,
+    )
+    if resp.status_code == 401:
+        raise PermissionError("[RotoscopingMasks] Invalid API key (401) when requesting upload URL.")
+    if resp.status_code == 403:
+        raise PermissionError("[RotoscopingMasks] API key lacks permission (403) for uploads.")
+    resp.raise_for_status()
+    data = resp.json()
+    if "upload_url" not in data or "s3_path" not in data:
+        raise RuntimeError(
+            f"[RotoscopingMasks] Unexpected presign response — missing upload_url/s3_path: {resp.text[:300]}"
+        )
+    return data
+
+
+def _put_file(file_path: str, upload_url: str):
+    # No Content-Type header — let the HTTP client default. Setting one risks a
+    # mismatch with how the presigned URL was signed on the server side.
+    with open(file_path, "rb") as f:
+        put_resp = requests.put(upload_url, data=f, timeout=UPLOAD_TIMEOUT)
+    if not put_resp.ok:
+        raise RuntimeError(
+            f"[RotoscopingMasks] Upload PUT failed ({put_resp.status_code}): {put_resp.text[:300]}"
+        )
+
+
+def _upload_local_file(api_key: str, file_path: str, filename: str) -> str:
+    presigned = _presign_upload(api_key, filename)
+    _put_file(file_path, presigned["upload_url"])
+    return presigned["s3_path"]
+
+
+def _save_video_to_tempfile(video) -> str:
+    fd, path = tempfile.mkstemp(suffix=".mp4", prefix="slapshot_video_")
+    os.close(fd)
+    if not hasattr(video, "save_to"):
+        raise RuntimeError(
+            "[RotoscopingMasks] VIDEO input does not expose save_to(); "
+            "upgrade ComfyUI or wire a compatible VIDEO source."
+        )
+    video.save_to(path)
+    return path
+
+
+def _save_mask_to_tempfile(mask_tensor, frame_idx: int):
+    import numpy as np
+    from PIL import Image
+
+    arr = mask_tensor.detach().cpu().numpy() if hasattr(mask_tensor, "detach") else np.asarray(mask_tensor)
+    if arr.ndim == 3 and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.ndim != 2:
+        raise ValueError(f"[RotoscopingMasks] Unexpected mask tensor shape: {arr.shape}")
+    arr = (np.clip(arr, 0.0, 1.0) * 255.0).astype("uint8")
+
+    name = f"{frame_idx:05d}.png"
+    fd, path = tempfile.mkstemp(suffix=f"_{name}", prefix="slapshot_mask_")
+    os.close(fd)
+    Image.fromarray(arr, mode="L").save(path)
+    return path, name
+
+
+def _iter_mask_frames(mask):
+    if mask.ndim == 2:
+        yield mask
+    elif mask.ndim == 3:
+        for i in range(mask.shape[0]):
+            yield mask[i]
+    elif mask.ndim == 4:
+        for i in range(mask.shape[0]):
+            yield mask[i, 0]
+    else:
+        raise ValueError(f"[RotoscopingMasks] Unsupported mask tensor rank: {mask.ndim}")
+
+
 class SlapshotRotoscopingNode:
     """
-    Same as SlapshotRotoscopingNode but accepts one or more reference mask S3 paths
-    supplied as a comma-separated string. Each path is sent as an element of
-    'references_path' in the service payload.
+    Accepts a ComfyUI VIDEO input and an optional MASK batch, uploads them via
+    pre-signed PUT URLs, submits a rotoscoping job, polls until complete, then
+    fetches a signed download URL for the result.
     """
 
     CATEGORY = "Slapshot"
@@ -44,82 +127,58 @@ class SlapshotRotoscopingNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "video_s3_path": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "s3://bucket/path/to/video.mp4",
-                }),
+                "video": ("VIDEO",),
                 "api_key": ("STRING", {
                     "default": "",
                     "multiline": False,
                     "placeholder": "your-api-key",
                     "password": True,
                 }),
-                "output_s3_path": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "s3://bucket/path/to/output/",
-                }),
-                "mask_s3_paths": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "s3://bucket/mask1.png, s3://bucket/mask2.png",
-                }),
-            }
+            },
+            "optional": {
+                "masks": ("MASK",),
+            },
         }
 
-    def run_rotoscoping_with_masks(
-        self,
-        video_s3_path: str,
-        api_key: str,
-        output_s3_path: str,
-        mask_s3_paths: str,
-    ):
-        # ── Validate inputs ───────────────────────────────────────────────────
-        api_key        = api_key.strip()
-        video_s3_path  = video_s3_path.strip()
-        output_s3_path = output_s3_path.strip()
+    def run_rotoscoping_with_masks(self, video, api_key, masks=None):
+        api_key = api_key.strip()
 
         if not api_key:
             raise ValueError("[RotoscopingMasks] api_key is required.")
-        if not video_s3_path:
-            raise ValueError("[RotoscopingMasks] video_s3_path is required.")
-        if not output_s3_path:
-            raise ValueError("[RotoscopingMasks] output_s3_path is required.")
+        if video is None:
+            raise ValueError("[RotoscopingMasks] video input is required.")
 
-        lower = video_s3_path.lower()
-        if not (lower.endswith(".mp4") or lower.endswith(".mov")):
-            raise ValueError(
-                f"[RotoscopingMasks] Unsupported file type. "
-                f"Only .mp4 and .mov are accepted, got: '{video_s3_path}'"
-            )
+        # ── Upload video ──────────────────────────────────────────────────────
+        video_local = _save_video_to_tempfile(video)
+        try:
+            print(f"[RotoscopingMasks] Uploading video clip.mp4 ...")
+            video_s3 = _upload_local_file(api_key, video_local, "clip.mp4")
+            print(f"[RotoscopingMasks] Video uploaded → {video_s3}")
+        finally:
+            try: os.unlink(video_local)
+            except OSError: pass
 
-        references = [p.strip() for p in mask_s3_paths.split(",") if p.strip()]
-
-        invalid = [p for p in references if not re.search(r"\d{5}\.png$", p)]
-        if invalid:
-            raise ValueError(
-                f"[RotoscopingMasks] Each mask path must end with a 5-digit frame number "
-                f"followed by '.png' (e.g. '00000.png'). Invalid paths: {invalid}"
-            )
+        # ── Upload masks (single batched MASK input, optional) ────────────────
+        references = []
+        if masks is not None:
+            for frame_idx, single in enumerate(_iter_mask_frames(masks)):
+                local_path, png_name = _save_mask_to_tempfile(single, frame_idx)
+                try:
+                    print(f"[RotoscopingMasks] Uploading mask {png_name} ...")
+                    s3_path = _upload_local_file(api_key, local_path, png_name)
+                    references.append(s3_path)
+                    print(f"[RotoscopingMasks] Mask uploaded → {s3_path}")
+                finally:
+                    try: os.unlink(local_path)
+                    except OSError: pass
 
         # ── Submit job ────────────────────────────────────────────────────────
         submit_url = f"{BASE_URL}/api/jobs"
-        service = {
-            "type": "roto",
-            "output_path": output_s3_path,
-        }
+        service = {"type": "roto"}
         if references:
             service["references_path"] = references
 
-        payload = {
-            "assets": [
-                {
-                    "source_path": video_s3_path,
-                    "services": [service],
-                }
-            ]
-        }
+        payload = {"assets": [{"source_path": video_s3, "services": [service]}]}
         print(f"[RotoscopingMasks] Submitting job to {submit_url} ...")
         print(f"[RotoscopingMasks] Payload: {json.dumps(payload, indent=2)}")
 
@@ -249,7 +308,6 @@ class SlapshotRotoscopingNode:
 
                     summary = {
                         "status": "complete" if total_completed == total else "partial",
-                        "message": "Check your email for the output path.",
                         "percent_complete": percent_complete,
                         "total": total,
                         "total_completed": total_completed,
@@ -270,9 +328,34 @@ class SlapshotRotoscopingNode:
         if "error" in result_box:
             raise result_box["error"]
 
-        display = json.dumps(result_box["value"], indent=2)
+        # ── Fetch download URL ────────────────────────────────────────────────
+        download_url = None
+        try:
+            dl_resp = requests.get(
+                f"{BASE_URL}/api/jobs/{job_id}/download",
+                headers=_headers(api_key),
+                timeout=REQUEST_TIMEOUT,
+            )
+            if dl_resp.ok:
+                download_url = dl_resp.json().get("download_url")
+                print(f"[RotoscopingMasks] Download URL retrieved.")
+            else:
+                print(
+                    f"[RotoscopingMasks] Could not retrieve download URL "
+                    f"({dl_resp.status_code}): {dl_resp.text[:300]}"
+                )
+        except requests.exceptions.RequestException as e:
+            print(f"[RotoscopingMasks] Network error fetching download URL: {e}")
+
+        summary = result_box["value"]
+        summary["download_url"] = download_url
+        display = json.dumps(summary, indent=2)
         print(f"[RotoscopingMasks] Done:\n{display}")
-        return {"ui": {"text": [display]}, "result": (display,)}
+
+        ui_payload = {"text": [display]}
+        if download_url:
+            ui_payload["download_url"] = [download_url]
+        return {"ui": ui_payload, "result": (display,)}
 
 
 # ── Registration ──────────────────────────────────────────────────────────────
