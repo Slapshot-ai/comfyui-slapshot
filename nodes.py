@@ -40,53 +40,6 @@ S3_OUTPUT_PREFIX = "comfyui-uploads/output"
 COMFYUI_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _MASK_FILENAME_RE = re.compile(r"^\d{5}\.png$")
-_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
-
-
-def _normalize_inference_id(raw: str) -> str:
-    """If raw is an S3 URI, extract the embedded UUID; otherwise return as-is."""
-    if raw and "://" in raw:
-        m = _UUID_RE.search(raw)
-        if m:
-            return m.group(0)
-    return raw
-
-
-# ── Download proxy (routes browser requests through ComfyUI to avoid CORS) ───
-
-try:
-    from server import PromptServer
-    from aiohttp import web
-
-    @PromptServer.instance.routes.post("/slapshot/download_url")
-    async def _slapshot_download_url(request):
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "Invalid JSON"}, status=400)
-
-        inference_id = body.get("inference_id", "").strip()
-        export_type  = body.get("export_type", "").strip()
-        api_key      = body.get("api_key", "").strip()
-        base_url     = body.get("base_url", BASE_URL).rstrip("/")
-
-        if not inference_id or not export_type or not api_key:
-            return web.json_response({"error": "Missing required parameters"}, status=400)
-
-        url = f"{base_url}/api/inference/{inference_id}/download_result?export_type={export_type}"
-        try:
-            resp = requests.get(url, headers={"x-api-key": api_key}, timeout=REQUEST_TIMEOUT)
-            resp.raise_for_status()
-            return web.json_response(resp.json())
-        except requests.exceptions.HTTPError:
-            return web.json_response(
-                {"error": f"API error {resp.status_code}: {resp.text[:200]}"}, status=502
-            )
-        except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=500)
-
-except Exception:
-    pass
 
 
 # ── Progress helper ───────────────────────────────────────────────────────────
@@ -278,6 +231,30 @@ def _find_video_source_file(video, filename: str | None) -> str | None:
     return None
 
 
+def _get_video_frame_count(video_path: str) -> int | None:
+    """Return the frame count of a video file, or None if it cannot be determined."""
+    try:
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        if cap.isOpened():
+            count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            if count > 0:
+                return count
+    except Exception:
+        pass
+    try:
+        import imageio
+        reader = imageio.get_reader(video_path)
+        count = reader.count_frames()
+        reader.close()
+        if count > 0:
+            return count
+    except Exception:
+        pass
+    return None
+
+
 def _save_video_locally(video) -> tuple:
     """Save a ComfyUI VIDEO object to a temp file. Returns (local_path, filename)."""
     raw = _extract_video_filename(video)
@@ -328,6 +305,29 @@ def _save_video_locally(video) -> tuple:
     return path, filename
 
 
+# ── Graph helpers ─────────────────────────────────────────────────────────────
+
+def _mask_filename_from_prompt(unique_id, prompt, slot_name: str) -> str | None:
+    """Walk the workflow graph to find the filename of the image connected to slot_name.
+
+    ComfyUI stores links as [source_node_id, output_index] in the prompt dict.
+    We follow the link from this node's slot back to the source node (LoadImage or
+    Slapshot_Load_Mask) and read its 'image' widget value.
+    """
+    if not prompt or not unique_id:
+        return None
+    node_data = prompt.get(str(unique_id), {})
+    link = node_data.get("inputs", {}).get(slot_name)
+    if not isinstance(link, list) or len(link) < 1:
+        return None
+    source = prompt.get(str(link[0]), {})
+    if source.get("class_type") not in ("LoadImage", "Slapshot_Load_Mask"):
+        return None
+    image_val = source.get("inputs", {}).get("image", "")
+    name = os.path.basename(image_val) if isinstance(image_val, str) else ""
+    return name if _MASK_FILENAME_RE.match(name) else None
+
+
 # ── API helpers ───────────────────────────────────────────────────────────────
 
 def _headers(api_key: str) -> dict:
@@ -360,10 +360,10 @@ class SlapshotRotoscopingNode:
                 }),
             },
             "optional": optional,
-            "hidden": {"unique_id": "UNIQUE_ID"},
+            "hidden": {"unique_id": "UNIQUE_ID", "prompt": "PROMPT"},
         }
 
-    def run_rotoscoping_with_masks(self, video, api_key, unique_id=None, **kwargs):
+    def run_rotoscoping_with_masks(self, video, api_key, unique_id=None, prompt=None, **kwargs):
         api_key = api_key.strip()
         if not api_key:
             raise ValueError("[RotoscopingMasks] api_key is required.")
@@ -371,12 +371,26 @@ class SlapshotRotoscopingNode:
         def progress(text: str):
             _send_progress(unique_id, text)
 
-        # Collect connected IMAGE tensors in slot order (mask_00 … mask_09).
-        mask_inputs = [
-            kwargs[f"mask_{i:02d}"]
-            for i in range(10)
-            if kwargs.get(f"mask_{i:02d}") is not None
-        ]
+        # Collect connected IMAGE tensors paired with their original filenames.
+        # _mask_filename_from_prompt walks the workflow graph to find the filename
+        # of the Load Image node connected to each slot (e.g. "00014.png" → frame 14).
+        # Falls back to a sequential index when the filename cannot be determined.
+        mask_inputs = []  # list of (tensor, frame_number, png_name)
+        fallback_idx = 0
+        for i in range(10):
+            tensor = kwargs.get(f"mask_{i:02d}")
+            if tensor is None:
+                continue
+            slot = f"mask_{i:02d}"
+            fname = _mask_filename_from_prompt(unique_id, prompt, slot)
+            if fname:
+                frame_number = int(os.path.splitext(fname)[0])
+                print(f"[RotoscopingMasks] {slot} → filename '{fname}' (frame {frame_number})")
+            else:
+                frame_number = fallback_idx
+                print(f"[RotoscopingMasks] {slot} → no filename found, using fallback index {frame_number}")
+            mask_inputs.append((tensor, frame_number, f"{frame_number:05d}.png"))
+            fallback_idx += 1
 
         # ── Load AWS credentials and generate upload UUID ─────────────────────
         aws_creds = _get_aws_credentials()
@@ -386,6 +400,19 @@ class SlapshotRotoscopingNode:
         # ── Upload video ──────────────────────────────────────────────────────
         video_local, video_filename = _save_video_locally(video)
         try:
+            if mask_inputs:
+                video_frame_count = _get_video_frame_count(video_local)
+                print(f"[RotoscopingMasks] Video frame count: {video_frame_count}")
+                if video_frame_count is not None:
+                    for _, frame_number, png_name in mask_inputs:
+                        if frame_number >= video_frame_count:
+                            raise ValueError(
+                                f"[RotoscopingMasks] Mask '{png_name}' targets frame "
+                                f"{frame_number + 1} but the video only has "
+                                f"{video_frame_count} frame(s). "
+                                f"Valid range: 00000–{video_frame_count - 1:05d}.png."
+                            )
+
             video_key = f"{S3_VIDEO_PREFIX}/{upload_id}/{video_filename}"
             progress(f"Uploading video: {video_filename}...")
             video_key = _s3_upload(video_local, S3_BUCKET, video_key, aws_creds)
@@ -396,30 +423,25 @@ class SlapshotRotoscopingNode:
             except OSError:
                 pass
 
-        # ── Upload masks ──────────────────────────────────────────────────────
-        # frame_idx is global across all connected slots → 00000.png, 00001.png …
+        # ── Upload masks using original filenames ─────────────────────────────
         references = []
-        frame_idx = 0
-        total_frames = sum(
-            sum(1 for _ in _iter_image_frames(m)) for m in mask_inputs
-        )
-        for mask in mask_inputs:
-            for frame in _iter_image_frames(mask):
-                local_path, png_name = _save_mask_to_tempfile(frame, frame_idx)
+        total_masks = len(mask_inputs)
+        for upload_num, (tensor, frame_number, png_name) in enumerate(mask_inputs, start=1):
+            frame = next(_iter_image_frames(tensor))
+            local_path, _ = _save_mask_to_tempfile(frame, frame_number)
+            try:
+                mask_key = f"{S3_MASKS_PREFIX}/{upload_id}/{png_name}"
+                progress(f"Uploading mask {upload_num}/{total_masks}: {png_name}...")
+                mask_key = _s3_upload(local_path, S3_BUCKET, mask_key, aws_creds)
+                references.append(mask_key)
+            finally:
                 try:
-                    mask_key = f"{S3_MASKS_PREFIX}/{upload_id}/{png_name}"
-                    progress(f"Uploading mask {frame_idx + 1}/{total_frames}: {png_name}...")
-                    mask_key = _s3_upload(local_path, S3_BUCKET, mask_key, aws_creds)
-                    references.append(mask_key)
-                finally:
-                    try:
-                        os.unlink(local_path)
-                    except OSError:
-                        pass
-                frame_idx += 1
+                    os.unlink(local_path)
+                except OSError:
+                    pass
 
-        if total_frames:
-            progress(f"All {total_frames} mask(s) uploaded ✓")
+        if total_masks:
+            progress(f"All {total_masks} mask(s) uploaded ✓")
 
         # ── Submit job ────────────────────────────────────────────────────────
         submit_url = f"{BASE_URL}/api/jobs"
@@ -459,10 +481,7 @@ class SlapshotRotoscopingNode:
             raise RuntimeError(
                 f"[RotoscopingMasks] Unexpected response — no job_id: {resp.text[:300]}"
             )
-        # inference_id may be separate from job_id; fall back to job_id if absent.
-        # Normalize in case the API returns an S3 URI — extract the embedded UUID.
-        inference_id = _normalize_inference_id(submit_data.get("inference_id") or job_id)
-        print(f"[RotoscopingMasks] Job submitted. job_id={job_id} inference_id={inference_id}")
+        print(f"[RotoscopingMasks] Job submitted. job_id={job_id}")
         progress("Job submitted. Waiting for inference to start...")
 
         # ── Poll for completion (background thread) ───────────────────────────
@@ -478,7 +497,6 @@ class SlapshotRotoscopingNode:
         result_box: dict = {}
 
         def _poll():
-            nonlocal inference_id
             poll_num = 0
             poll_start = time.monotonic()
 
@@ -524,17 +542,13 @@ class SlapshotRotoscopingNode:
                     return
 
                 data = poll_resp.json()
-                percent    = data.get("percent_complete", 0)
-                total      = data.get("total", 0)
-                pending    = data.get("total_pending", 0)
-                running    = data.get("total_running", 0)
-                completed  = data.get("total_completed", 0)
-                failed     = data.get("total_failed", 0)
-                cancelled  = data.get("total_cancelled", 0)
-
-                # Update inference_id if the poll response carries one.
-                if data.get("inference_id"):
-                    inference_id = _normalize_inference_id(data["inference_id"])
+                percent   = data.get("percent_complete", 0)
+                total     = data.get("total", 0)
+                pending   = data.get("total_pending", 0)
+                running   = data.get("total_running", 0)
+                completed = data.get("total_completed", 0)
+                failed    = data.get("total_failed", 0)
+                cancelled = data.get("total_cancelled", 0)
 
                 if pbar is not None:
                     pbar.update_absolute(percent)
@@ -551,7 +565,6 @@ class SlapshotRotoscopingNode:
                         return
 
                     result_box["value"] = {
-                        "inference_id": inference_id,
                         "status": "complete" if completed == total else "partial",
                         "percent_complete": percent,
                     }
@@ -569,15 +582,14 @@ class SlapshotRotoscopingNode:
 
         progress("Inference completed ✓")
 
-        final_inference_id = result_box["value"]["inference_id"]
         display = "Inference completed ✓"
-        print(f"[RotoscopingMasks] Done. inference_id={final_inference_id}")
+        print(f"[RotoscopingMasks] Done. job_id={job_id}")
 
         return {
             "ui": {
-                "text":         [display],
-                "inference_id": [final_inference_id],
-                "base_url":     [BASE_URL],
+                "text":     [display],
+                "job_id":   [job_id],
+                "base_url": [BASE_URL],
             },
             "result": (display,),
         }
@@ -587,9 +599,8 @@ class SlapshotRotoscopingNode:
 
 class SlapshotLoadMaskNode:
     """
-    Load a mask image and validate its filename follows {num:05d}.png before it
-    reaches the rotoscoping node. Outputs IMAGE so it connects directly to the
-    mask_XX inputs without an extra conversion node.
+    Load a mask image and validate its filename follows {num:05d}.png before
+    connecting it to the rotoscoping node.
     """
 
     CATEGORY = "Slapshot"
@@ -622,6 +633,8 @@ class SlapshotLoadMaskNode:
                 f"Rename the file before loading it."
             )
 
+        frame_number = int(os.path.splitext(filename)[0])
+
         image_path = folder_paths.get_annotated_filepath(image)
         img = Image.open(image_path)
         img = ImageOps.exif_transpose(img)
@@ -629,7 +642,7 @@ class SlapshotLoadMaskNode:
 
         arr = np.array(img).astype(np.float32) / 255.0
         tensor = torch.from_numpy(arr).unsqueeze(0)  # (1, H, W, 3)
-        print(f"[RotoscopingMasks] Loaded mask '{filename}' — shape {list(tensor.shape)}")
+        print(f"[RotoscopingMasks] Loaded mask '{filename}' — frame {frame_number}, shape {list(tensor.shape)}")
         return (tensor,)
 
 

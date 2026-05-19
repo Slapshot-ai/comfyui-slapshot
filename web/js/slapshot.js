@@ -93,17 +93,17 @@ app.registerExtension({
             }
 
             // Enable download buttons once inference is complete.
-            const inferenceId = Array.isArray(message?.inference_id)
-                ? message.inference_id[0]
-                : message?.inference_id;
+            const jobId = Array.isArray(message?.job_id)
+                ? message.job_id[0]
+                : message?.job_id;
             const baseUrl = Array.isArray(message?.base_url)
                 ? message.base_url[0]
                 : message?.base_url;
 
-            if (inferenceId) {
-                this._slapshotInferenceId = inferenceId;
-                this._slapshotBaseUrl     = baseUrl;
-                this._slapshotReady       = true;
+            if (jobId) {
+                this._slapshotJobId   = jobId;
+                this._slapshotBaseUrl = baseUrl;
+                this._slapshotReady   = true;
 
                 if (this._hardMatteBtn) {
                     this._hardMatteBtn.name = "⬇  Download Hard Matte";
@@ -120,7 +120,7 @@ app.registerExtension({
 // ── Download helper ───────────────────────────────────────────────────────────
 
 async function _slapshotDownload(node, exportType) {
-    if (!node._slapshotReady || !node._slapshotInferenceId) {
+    if (!node._slapshotReady || !node._slapshotJobId) {
         return; // Button label already says "run inference first"
     }
 
@@ -130,28 +130,30 @@ async function _slapshotDownload(node, exportType) {
         return;
     }
 
+    const url = `${node._slapshotBaseUrl}/api/job/${node._slapshotJobId}/download_result?export_type=${exportType}`;
+
+    console.log(`[Slapshot] download_result → GET ${url}`);
+
     try {
-        // Route through ComfyUI backend to avoid CORS on the external API.
-        const resp = await fetch("/slapshot/download_url", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                inference_id: node._slapshotInferenceId,
-                export_type:  exportType,
-                api_key:      apiKey,
-                base_url:     node._slapshotBaseUrl,
-            }),
+        const resp = await fetch(url, {
+            headers: { "x-api-key": apiKey },
         });
+        console.log(`[Slapshot] download_result ← status ${resp.status}`);
         if (!resp.ok) {
+            const body = await resp.text().catch(() => "");
+            console.error(`[Slapshot] download_result error body:`, body);
             alert(`Slapshot: download request failed (${resp.status}).`);
             return;
         }
         const data = await resp.json();
+        console.log(`[Slapshot] download_result response:`, data);
         const downloadUrl = data.download_url || data.url || data.presigned_url;
         if (!downloadUrl) {
+            console.warn(`[Slapshot] download_result: no download URL found in response keys:`, Object.keys(data));
             alert("Slapshot: no download URL in response.");
             return;
         }
+        console.log(`[Slapshot] triggering download from:`, downloadUrl);
         const a = document.createElement("a");
         a.href = downloadUrl;
         a.target = "_blank";
