@@ -72,7 +72,6 @@ app.registerExtension({
             mbMatteBtn.serialize = false;
             node._mbMatteBtn = mbMatteBtn;
 
-            // Enforce a minimum node width so button labels are never clipped.
             requestAnimationFrame(() => {
                 if (node.size[0] < 400) {
                     node.setSize([400, node.size[1]]);
@@ -130,13 +129,20 @@ async function _slapshotDownload(node, exportType) {
         return;
     }
 
-    const url = `${node._slapshotBaseUrl}/api/job/${node._slapshotJobId}/download_result?export_type=${exportType}`;
-
-    console.log(`[Slapshot] download_result → GET ${url}`);
+    const externalUrl = `${node._slapshotBaseUrl}/api/job/${node._slapshotJobId}/download_result?export_type=${exportType}`;
+    console.log(`[Slapshot] download_result → GET ${externalUrl} (proxied via ComfyUI)`);
 
     try {
-        const resp = await fetch(url, {
-            headers: { "x-api-key": apiKey },
+        // Route through ComfyUI Python backend to avoid browser CORS restrictions.
+        const resp = await fetch("/slapshot/download_url", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                job_id:      node._slapshotJobId,
+                export_type: exportType,
+                api_key:     apiKey,
+                base_url:    node._slapshotBaseUrl,
+            }),
         });
         console.log(`[Slapshot] download_result ← status ${resp.status}`);
         if (!resp.ok) {

@@ -42,6 +42,45 @@ COMFYUI_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 _MASK_FILENAME_RE = re.compile(r"^\d{5}\.png$")
 
 
+# ── Download proxy (avoids browser CORS on the external API) ─────────────────
+
+try:
+    from server import PromptServer as _PS
+    from aiohttp import web as _web
+
+    @_PS.instance.routes.post("/slapshot/download_url")
+    async def _slapshot_download_url(request):
+        try:
+            body = await request.json()
+        except Exception:
+            return _web.json_response({"error": "Invalid JSON"}, status=400)
+
+        job_id      = body.get("job_id", "").strip()
+        export_type = body.get("export_type", "").strip()
+        api_key     = body.get("api_key", "").strip()
+        base_url    = body.get("base_url", BASE_URL).rstrip("/")
+
+        if not job_id or not export_type or not api_key:
+            return _web.json_response({"error": "Missing required parameters"}, status=400)
+
+        url = f"{base_url}/api/job/{job_id}/download_result?export_type={export_type}"
+        print(f"[RotoscopingMasks] download_result → GET {url}")
+        try:
+            resp = requests.get(url, headers={"x-api-key": api_key}, timeout=REQUEST_TIMEOUT)
+            print(f"[RotoscopingMasks] download_result ← {resp.status_code}: {resp.text[:300]}")
+            resp.raise_for_status()
+            return _web.json_response(resp.json())
+        except requests.exceptions.HTTPError:
+            return _web.json_response(
+                {"error": f"API error {resp.status_code}: {resp.text[:200]}"}, status=502
+            )
+        except Exception as exc:
+            return _web.json_response({"error": str(exc)}, status=500)
+
+except Exception:
+    pass
+
+
 # ── Progress helper ───────────────────────────────────────────────────────────
 
 def _send_progress(node_id, text: str) -> None:
