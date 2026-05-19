@@ -382,8 +382,8 @@ class SlapshotRotoscopingNode:
     CATEGORY = "Slapshot"
     FUNCTION = "run_rotoscoping_with_masks"
     OUTPUT_NODE = True
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("status_message",)
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -630,7 +630,7 @@ class SlapshotRotoscopingNode:
                 "job_id":   [job_id],
                 "base_url": [BASE_URL],
             },
-            "result": (display,),
+            "result": (),
         }
 
 

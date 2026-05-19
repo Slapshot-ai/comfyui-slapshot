@@ -10,8 +10,6 @@ const PREVIEW_NODES = [
 ];
 
 // ── Real-time progress updates from Python ────────────────────────────────────
-// Python calls _send_progress(node_id, text) which fires "slapshot_progress"
-// over the ComfyUI websocket. We find the node and update its preview_text.
 
 api.addEventListener("slapshot_progress", ({ detail }) => {
     const node = app.graph.getNodeById(parseInt(detail.node_id));
@@ -19,10 +17,11 @@ api.addEventListener("slapshot_progress", ({ detail }) => {
     const w = node.widgets?.find(w => w.name === "preview_text");
     if (!w) return;
     w.value = detail.text;
+    node._inferenceRunning = true;
     app.graph.setDirtyCanvas(true);
 });
 
-// ── Inline text preview + download buttons ────────────────────────────────────
+// ── Inline Console + download buttons ────────────────────────────────────────
 
 app.registerExtension({
     name: "Slapshot.TextPreview",
@@ -35,48 +34,55 @@ app.registerExtension({
 
             const node = this;
 
-            // ── Preview text widget (read-only, fixed 260 px tall) ────────────
+            // Set video input label synchronously before first render.
+            const videoInput = node.inputs?.find(inp => inp.name === "video");
+            if (videoInput) videoInput.label = "Video";
+
+            // ── Console widget (read-only, fixed 260 px tall) ─────────────────
             const widget = ComfyWidgets["STRING"](
                 node,
                 "preview_text",
                 ["STRING", { multiline: true }],
                 app
             ).widget;
+            widget.label = "Console";
             widget.inputEl.readOnly = true;
             widget.inputEl.style.opacity = 0.7;
             widget.inputEl.style.height = "260px";
             widget.inputEl.style.minHeight = "260px";
             widget.inputEl.style.resize = "none";
-            // LiteGraph calls computeSize(width) when laying out widgets.
-            // Return a fixed height so the widget never collapses.
             widget.computeSize = (width) => [width, 260];
             widget.serialize = false;
 
-            // ── Download Hard Matte button ────────────────────────────────────
+            // ── Download buttons (disabled until inference completes) ──────────
             const hardMatteBtn = node.addWidget(
-                "button",
-                "Download Hard Matte  (run inference first)",
-                null,
+                "button", "Download Hard Matte", null,
                 async () => { await _slapshotDownload(node, "hard_matte"); }
             );
+            hardMatteBtn.disabled = true;
             hardMatteBtn.serialize = false;
             node._hardMatteBtn = hardMatteBtn;
 
-            // ── Download MB Matte button ──────────────────────────────────────
             const mbMatteBtn = node.addWidget(
-                "button",
-                "Download MB Matte  (run inference first)",
-                null,
+                "button", "Download MB Matte", null,
                 async () => { await _slapshotDownload(node, "mb_matte"); }
             );
+            mbMatteBtn.disabled = true;
             mbMatteBtn.serialize = false;
             node._mbMatteBtn = mbMatteBtn;
 
             requestAnimationFrame(() => {
-                if (node.size[0] < 400) {
-                    node.setSize([400, node.size[1]]);
-                    app.graph.setDirtyCanvas(true);
-                }
+                // Relabel the api_key widget
+                const apiKeyWidget = node.widgets?.find(w => w.name === "api_key");
+                if (apiKeyWidget) apiKeyWidget.label = "API key";
+
+                // Title-case any mask inputs that exist at load time.
+                node.inputs?.forEach(inp => {
+                    if (/^mask_\d+$/.test(inp.name))
+                        inp.label = "Mask_" + inp.name.slice(5);
+                });
+
+                _setNodeSize(node);
             });
         };
 
@@ -84,14 +90,12 @@ app.registerExtension({
         nodeType.prototype.onExecuted = function (message) {
             onExecuted?.apply(this, arguments);
 
-            // Update preview text.
             const w = this.widgets?.find(w => w.name === "preview_text");
             if (w && message?.text) {
                 w.value = Array.isArray(message.text) ? message.text[0] : message.text;
                 app.graph.setDirtyCanvas(true);
             }
 
-            // Enable download buttons once inference is complete.
             const jobId = Array.isArray(message?.job_id)
                 ? message.job_id[0]
                 : message?.job_id;
@@ -100,15 +104,18 @@ app.registerExtension({
                 : message?.base_url;
 
             if (jobId) {
-                this._slapshotJobId   = jobId;
-                this._slapshotBaseUrl = baseUrl;
-                this._slapshotReady   = true;
+                this._slapshotJobId    = jobId;
+                this._slapshotBaseUrl  = baseUrl;
+                this._slapshotReady    = true;
+                this._inferenceRunning = false;
 
                 if (this._hardMatteBtn) {
-                    this._hardMatteBtn.name = "⬇  Download Hard Matte";
+                    this._hardMatteBtn.name     = "⬇  Download Hard Matte";
+                    this._hardMatteBtn.disabled = false;
                 }
                 if (this._mbMatteBtn) {
-                    this._mbMatteBtn.name = "⬇  Download MB Matte";
+                    this._mbMatteBtn.name     = "⬇  Download MB Matte";
+                    this._mbMatteBtn.disabled = false;
                 }
                 app.graph.setDirtyCanvas(true);
             }
@@ -120,7 +127,11 @@ app.registerExtension({
 
 async function _slapshotDownload(node, exportType) {
     if (!node._slapshotReady || !node._slapshotJobId) {
-        return; // Button label already says "run inference first"
+        const msg = node._inferenceRunning
+            ? "Inference is running. You'll be able to download it as soon as it is completed."
+            : "Download is available once inference is completed.";
+        alert(msg);
+        return;
     }
 
     const apiKey = node.widgets?.find(w => w.name === "api_key")?.value;
@@ -133,7 +144,6 @@ async function _slapshotDownload(node, exportType) {
     console.log(`[Slapshot] download_result → GET ${externalUrl} (proxied via ComfyUI)`);
 
     try {
-        // Route through ComfyUI Python backend to avoid browser CORS restrictions.
         const resp = await fetch("/slapshot/download_url", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -155,7 +165,7 @@ async function _slapshotDownload(node, exportType) {
         console.log(`[Slapshot] download_result response:`, data);
         const downloadUrl = data.download_url || data.url || data.presigned_url;
         if (!downloadUrl) {
-            console.warn(`[Slapshot] download_result: no download URL found in response keys:`, Object.keys(data));
+            console.warn(`[Slapshot] no download URL in response keys:`, Object.keys(data));
             alert("Slapshot: no download URL in response.");
             return;
         }
@@ -173,10 +183,18 @@ async function _slapshotDownload(node, exportType) {
     }
 }
 
-// ── Dynamic MASK input slots for Slapshot — Rotoscoping ──────────────────────
-// Python declares mask_00…mask_09 as optional IMAGE inputs for type validation.
-// This extension strips them on creation and replaces with an "+ Add Mask" button.
-// LiteGraph serialises the inputs array so added slots survive save/reload.
+// ── Size helper ───────────────────────────────────────────────────────────────
+// Never shrink below the current user-resized width or the 500px minimum.
+
+function _setNodeSize(node) {
+    const computed = node.computeSize();
+    const w = Math.max(node.size[0], computed[0], 500);
+    const h = Math.max(computed[1]);
+    node.setSize([w, h]);
+    app.graph.setDirtyCanvas(true);
+}
+
+// ── Dynamic MASK input slots ──────────────────────────────────────────────────
 
 app.registerExtension({
     name: "Slapshot.DynamicMaskInputs",
@@ -187,27 +205,67 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             onNodeCreated?.apply(this, arguments);
 
+            const node = this;
+
             // Strip all statically-declared mask_XX slots.
             for (let i = this.inputs.length - 1; i >= 0; i--) {
-                if (/^mask_\d+$/.test(this.inputs[i].name)) {
-                    this.removeInput(i);
-                }
+                if (/^mask_\d+$/.test(this.inputs[i].name)) this.removeInput(i);
             }
 
-            const addBtn = this.addWidget("button", "+ Add Mask", null, () => {
-                _addMaskSlot(this);
+            const addBtn = node.addWidget("button", "+ Add Mask", null, () => {
+                _addMaskSlot(node);
+                _updateMaskBtns(node, addBtn, removeBtn);
             });
             addBtn.serialize = false;
+
+            const removeBtn = node.addWidget("button", "✕ Remove Last Mask", null, () => {
+                _removeMaskSlot(node);
+                _updateMaskBtns(node, addBtn, removeBtn);
+            });
+            removeBtn.disabled = true;
+            removeBtn.serialize = false;
+
+            // Move add/remove buttons to sit above the api_key widget.
+            // All extensions have run by the next frame so indices are stable.
+            requestAnimationFrame(() => {
+                const btns = [addBtn, removeBtn];
+                btns.forEach(btn => {
+                    const idx = node.widgets.indexOf(btn);
+                    if (idx >= 0) node.widgets.splice(idx, 1);
+                });
+                const apiKeyIdx = node.widgets.findIndex(w => w.name === "api_key");
+                node.widgets.splice(apiKeyIdx >= 0 ? apiKeyIdx : 0, 0, ...btns);
+
+                _updateMaskBtns(node, addBtn, removeBtn);
+            });
         };
     },
 });
 
+function _updateMaskBtns(node, addBtn, removeBtn) {
+    const count = node.inputs.filter(inp => /^mask_\d+$/.test(inp.name)).length;
+    addBtn.name = count === 0 ? "+ Add Mask" : "+ Add More Masks";
+    removeBtn.name     = "✕ Remove Last Mask";
+    removeBtn.disabled = count === 0;
+    _setNodeSize(node);
+}
+
 function _addMaskSlot(node) {
     const count = node.inputs.filter(inp => /^mask_\d+$/.test(inp.name)).length;
     if (count >= 10) return;
-    node.addInput(`mask_${String(count).padStart(2, "0")}`, "IMAGE");
-    node.setSize(node.computeSize());
-    app.graph.setDirtyCanvas(true);
+    const slotName = `mask_${String(count).padStart(2, "0")}`;
+    node.addInput(slotName, "IMAGE");
+    node.inputs[node.inputs.length - 1].label = "Mask_" + slotName.slice(5);
+    _setNodeSize(node);
+}
+
+function _removeMaskSlot(node) {
+    const maskInputs = node.inputs
+        .map((inp, i) => ({ inp, i }))
+        .filter(({ inp }) => /^mask_\d+$/.test(inp.name));
+    if (maskInputs.length === 0) return;
+    node.removeInput(maskInputs[maskInputs.length - 1].i);
+    _setNodeSize(node);
 }
 
 // ── Dynamic mask path list (Slapshot_Dynamic_Masks_Test only) ─────────────────
