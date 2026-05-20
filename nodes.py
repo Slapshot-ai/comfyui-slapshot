@@ -50,7 +50,7 @@ try:
         if not job_id or not export_type or not api_key:
             return _web.json_response({"error": "Missing required parameters"}, status=400)
 
-        url = f"{base_url}/api/comfyui/{job_id}/result"
+        url = f"{base_url}/api/comfyui/{job_id}/result?export_type={export_type}"
         print(f"[RotoscopingMasks] download_result → GET {url}")
         resp = None
         try:
@@ -331,7 +331,12 @@ def _mask_filename_from_prompt(unique_id, prompt, slot_name: str) -> str | None:
         return None
     image_val = source.get("inputs", {}).get("image", "")
     name = os.path.basename(image_val) if isinstance(image_val, str) else ""
-    return name if _MASK_FILENAME_RE.match(name) else None
+    if not _MASK_FILENAME_RE.match(name):
+        raise ValueError(
+            f"[RotoscopingMasks] Mask '{name}' connected to '{slot_name}' does not follow "
+            f"the required naming pattern — expected a 5-digit frame number like '00014.png'."
+        )
+    return name
 
 
 # ── API helpers ───────────────────────────────────────────────────────────────
