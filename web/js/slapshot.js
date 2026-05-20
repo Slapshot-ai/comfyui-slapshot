@@ -56,7 +56,7 @@ app.registerExtension({
 
             // ── Download buttons (disabled until inference completes) ──────────
             const hardMatteBtn = node.addWidget(
-                "button", "Download Hard Matte", null,
+                "button", "Download Hard Mattes", null,
                 async () => { await _slapshotDownload(node, "hard_mattes"); }
             );
             hardMatteBtn.disabled = true;
@@ -64,7 +64,7 @@ app.registerExtension({
             node._hardMatteBtn = hardMatteBtn;
 
             const mbMatteBtn = node.addWidget(
-                "button", "Download MB Matte", null,
+                "button", "Download MB Mattes", null,
                 async () => { await _slapshotDownload(node, "mb_mattes"); }
             );
             mbMatteBtn.disabled = true;
@@ -110,11 +110,11 @@ app.registerExtension({
                 this._inferenceRunning = false;
 
                 if (this._hardMatteBtn) {
-                    this._hardMatteBtn.name     = "⬇  Download Hard Matte";
+                    this._hardMatteBtn.name     = "⬇  Download Hard Mattes";
                     this._hardMatteBtn.disabled = false;
                 }
                 if (this._mbMatteBtn) {
-                    this._mbMatteBtn.name     = "⬇  Download MB Matte";
+                    this._mbMatteBtn.name     = "⬇  Download MB Mattes";
                     this._mbMatteBtn.disabled = false;
                 }
                 app.graph.setDirtyCanvas(true);
