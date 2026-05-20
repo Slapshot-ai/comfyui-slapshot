@@ -26,7 +26,7 @@ MAX_POLL_SECONDS = 5 * 60 * 60  # 5 hours
 
 _MASK_FILENAME_RE = re.compile(r"^\d{5}\.png$")
 
-S3_OUTPUT_PREFIX = "comfyui-assets"
+S3_OUTPUT_PREFIX = "comfyui-autopilot"
 
 
 # ── Download proxy (avoids browser CORS on the external API) ─────────────────
