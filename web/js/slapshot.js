@@ -57,7 +57,7 @@ app.registerExtension({
             // ── Download buttons (disabled until inference completes) ──────────
             const hardMatteBtn = node.addWidget(
                 "button", "Download Hard Matte", null,
-                async () => { await _slapshotDownload(node, "hard_matte"); }
+                async () => { await _slapshotDownload(node, "hard_mattes"); }
             );
             hardMatteBtn.disabled = true;
             hardMatteBtn.serialize = false;
@@ -65,7 +65,7 @@ app.registerExtension({
 
             const mbMatteBtn = node.addWidget(
                 "button", "Download MB Matte", null,
-                async () => { await _slapshotDownload(node, "mb_matte"); }
+                async () => { await _slapshotDownload(node, "mb_mattes"); }
             );
             mbMatteBtn.disabled = true;
             mbMatteBtn.serialize = false;
