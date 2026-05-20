@@ -2,15 +2,9 @@
 Slapshot Rotoscoping Node
 =========================
 Accepts a ComfyUI VIDEO input and up to 10 optional IMAGE inputs (connect outputs
-from Load Image nodes directly). Uploads the video and mask frames to S3 using
-AWS credentials from <comfyui_root>/.env, submits a rotoscoping job to the
-Slapshot API, polls until complete, and surfaces download buttons for hard matte
-and MB matte results.
-
-S3 layout (one UUID per execution, shared across video and masks):
-  staging-autopilot-generic/comfyui-uploads/videos/{uuid}/{video_filename}
-  staging-autopilot-generic/comfyui-uploads/masks/{uuid}/{00000..N}.png
-  staging-autopilot-generic/comfyui-uploads/output/{uuid}/
+from Load Image nodes directly). Uploads the video and mask frames via presigned
+URLs obtained from the Slapshot API, submits a rotoscoping job, polls until
+complete, and surfaces download buttons for the results.
 """
 
 import os
@@ -22,7 +16,6 @@ import threading
 import tempfile
 import torch
 import requests
-import boto3
 import folder_paths
 
 BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.work").rstrip("/")
@@ -31,15 +24,9 @@ POLL_INTERVAL_SECONDS = 60
 REQUEST_TIMEOUT = 30
 MAX_POLL_SECONDS = 5 * 60 * 60  # 5 hours
 
-S3_BUCKET = "staging-autopilot-generic"
-S3_VIDEO_PREFIX = "comfyui-uploads/videos"
-S3_MASKS_PREFIX = "comfyui-uploads/masks"
-S3_OUTPUT_PREFIX = "comfyui-uploads/output"
-
-# nodes.py → comfyui-slapshot/ → custom_nodes/ → ComfyUI/
-COMFYUI_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 _MASK_FILENAME_RE = re.compile(r"^\d{5}\.png$")
+
+S3_OUTPUT_PREFIX = "comfyui-assets"
 
 
 # ── Download proxy (avoids browser CORS on the external API) ─────────────────
@@ -63,8 +50,9 @@ try:
         if not job_id or not export_type or not api_key:
             return _web.json_response({"error": "Missing required parameters"}, status=400)
 
-        url = f"{base_url}/api/job/{job_id}/download_result?export_type={export_type}"
+        url = f"{base_url}/api/comfyui/{job_id}/result"
         print(f"[RotoscopingMasks] download_result → GET {url}")
+        resp = None
         try:
             resp = requests.get(url, headers={"x-api-key": api_key}, timeout=REQUEST_TIMEOUT)
             print(f"[RotoscopingMasks] download_result ← {resp.status_code}: {resp.text[:300]}")
@@ -98,56 +86,35 @@ def _send_progress(node_id, text: str) -> None:
         pass
 
 
-# ── AWS / S3 helpers ──────────────────────────────────────────────────────────
+# ── Presigned URL upload helpers ──────────────────────────────────────────────
 
-def _load_dot_env(path: str) -> dict:
-    env = {}
-    if not os.path.isfile(path):
-        return env
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            env[key.strip()] = value.strip().strip('"').strip("'")
-    return env
-
-
-def _get_aws_credentials() -> dict:
-    env_path = os.path.join(COMFYUI_ROOT, ".env")
-    dot_env = _load_dot_env(env_path)
-
-    def _get(key: str) -> str:
-        return dot_env.get(key) or os.environ.get(key, "")
-
-    access_key    = _get("AWS_ACCESS_KEY_ID")
-    secret_key    = _get("AWS_SECRET_ACCESS_KEY")
-    session_token = _get("AWS_SESSION_TOKEN")
-    region        = _get("AWS_REGION") or _get("AWS_DEFAULT_REGION") or "us-east-1"
-
-    missing = [k for k, v in [("AWS_ACCESS_KEY_ID", access_key), ("AWS_SECRET_ACCESS_KEY", secret_key)] if not v]
-    if missing:
+def _get_presigned_upload_url(base_url: str, api_key: str, upload_id: str,
+                               asset_type: str, file_name: str) -> tuple:
+    """Returns (upload_url, s3_key)."""
+    url = (f"{base_url}/api/comfyui/assets/upload"
+           f"?upload_id={upload_id}&asset_type={asset_type}&file_name={file_name}")
+    resp = requests.get(url, headers={"x-api-key": api_key}, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
+    upload_url = data.get("upload_url")
+    s3_key = data.get("s3_key")
+    if not upload_url or not s3_key:
         raise RuntimeError(
-            f"[RotoscopingMasks] Missing AWS credentials: {', '.join(missing)}. "
-            f"Add them to {env_path}"
+            f"[RotoscopingMasks] Missing upload_url or s3_key in upload response: {resp.text[:300]}"
         )
-
-    creds = {
-        "aws_access_key_id":     access_key,
-        "aws_secret_access_key": secret_key,
-        "region_name":           region,
-    }
-    if session_token:
-        creds["aws_session_token"] = session_token
-    return creds
+    return upload_url, s3_key
 
 
-def _s3_upload(local_path: str, bucket: str, key: str, credentials: dict) -> str:
-    """Upload a local file to S3 and return the bare key (no s3:// prefix)."""
-    client = boto3.client("s3", **credentials)
-    client.upload_file(local_path, bucket, key)
-    return key
+def _upload_to_presigned_url(presigned_url: str, local_path: str) -> None:
+    file_size = os.path.getsize(local_path)
+    with open(local_path, "rb") as f:
+        resp = requests.put(
+            presigned_url,
+            data=f,
+            headers={"Content-Length": str(file_size)},
+            timeout=300,
+        )
+    resp.raise_for_status()
 
 
 # ── Mask / image tensor helpers ───────────────────────────────────────────────
@@ -403,9 +370,9 @@ class SlapshotRotoscopingNode:
         }
 
     def run_rotoscoping_with_masks(self, video, api_key, unique_id=None, prompt=None, **kwargs):
-        api_key = api_key.strip()
-        if not api_key:
-            raise ValueError("[RotoscopingMasks] api_key is required.")
+        api_key = (api_key or "").strip()
+        if not api_key or api_key.lower() == "none":
+            raise ValueError("[RotoscopingMasks] API Key is required.")
 
         def progress(text: str):
             _send_progress(unique_id, text)
@@ -431,31 +398,35 @@ class SlapshotRotoscopingNode:
             mask_inputs.append((tensor, frame_number, f"{frame_number:05d}.png"))
             fallback_idx += 1
 
-        # ── Load AWS credentials and generate upload UUID ─────────────────────
-        aws_creds = _get_aws_credentials()
+        # ── Generate upload UUID (shared across video and all masks) ─────────
         upload_id = str(uuid.uuid4())
         print(f"[RotoscopingMasks] Upload ID: {upload_id}")
 
         # ── Upload video ──────────────────────────────────────────────────────
         video_local, video_filename = _save_video_locally(video)
+        video_key = None
         try:
-            if mask_inputs:
-                video_frame_count = _get_video_frame_count(video_local)
-                print(f"[RotoscopingMasks] Video frame count: {video_frame_count}")
-                if video_frame_count is not None:
-                    for _, frame_number, png_name in mask_inputs:
-                        if frame_number >= video_frame_count:
-                            raise ValueError(
-                                f"[RotoscopingMasks] Mask '{png_name}' targets frame "
-                                f"{frame_number + 1} but the video only has "
-                                f"{video_frame_count} frame(s). "
-                                f"Valid range: 00000–{video_frame_count - 1:05d}.png."
-                            )
+            video_frame_count = _get_video_frame_count(video_local)
+            print(f"[RotoscopingMasks] Video frame count: {video_frame_count}")
+            if video_frame_count is not None:
+                if video_frame_count > 3500:
+                    raise ValueError(
+                        f"[RotoscopingMasks] Input video should not exceed 3500 frames "
+                        f"(got {video_frame_count})."
+                    )
+                for _, frame_number, png_name in mask_inputs:
+                    if frame_number >= video_frame_count:
+                        raise ValueError(
+                            f"[RotoscopingMasks] Mask '{png_name}' targets frame "
+                            f"{frame_number + 1} but the video only has "
+                            f"{video_frame_count} frame(s). "
+                            f"Valid range: 00000–{video_frame_count - 1:05d}.png."
+                        )
 
-            video_key = f"{S3_VIDEO_PREFIX}/{upload_id}/{video_filename}"
             progress(f"Uploading video: {video_filename}...")
-            video_key = _s3_upload(video_local, S3_BUCKET, video_key, aws_creds)
-            progress(f"Video uploaded ✓")
+            upload_url, video_key = _get_presigned_upload_url(BASE_URL, api_key, upload_id, "video", video_filename)
+            _upload_to_presigned_url(upload_url, video_local)
+            progress("Video uploaded ✓")
         finally:
             try:
                 os.unlink(video_local)
@@ -469,9 +440,9 @@ class SlapshotRotoscopingNode:
             frame = next(_iter_image_frames(tensor))
             local_path, _ = _save_mask_to_tempfile(frame, frame_number)
             try:
-                mask_key = f"{S3_MASKS_PREFIX}/{upload_id}/{png_name}"
                 progress(f"Uploading mask {upload_num}/{total_masks}: {png_name}...")
-                mask_key = _s3_upload(local_path, S3_BUCKET, mask_key, aws_creds)
+                upload_url, mask_key = _get_presigned_upload_url(BASE_URL, api_key, upload_id, "mask", png_name)
+                _upload_to_presigned_url(upload_url, local_path)
                 references.append(mask_key)
             finally:
                 try:
@@ -484,7 +455,7 @@ class SlapshotRotoscopingNode:
 
         # ── Submit job ────────────────────────────────────────────────────────
         submit_url = f"{BASE_URL}/api/jobs"
-        output_key = f"{S3_OUTPUT_PREFIX}/{upload_id}/"
+        output_key = f"{S3_OUTPUT_PREFIX}/{upload_id}/output/"
         service: dict = {"type": "roto", "output_path": output_key}
         if references:
             service["references_path"] = references
@@ -493,6 +464,7 @@ class SlapshotRotoscopingNode:
         progress("Submitting job...")
         print(f"[RotoscopingMasks] Payload: {json.dumps(payload, indent=2)}")
 
+        resp = None
         try:
             resp = requests.post(
                 submit_url,

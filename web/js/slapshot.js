@@ -140,7 +140,7 @@ async function _slapshotDownload(node, exportType) {
         return;
     }
 
-    const externalUrl = `${node._slapshotBaseUrl}/api/job/${node._slapshotJobId}/download_result?export_type=${exportType}`;
+    const externalUrl = `${node._slapshotBaseUrl}/api/comfyui/${node._slapshotJobId}/result`;
     console.log(`[Slapshot] download_result → GET ${externalUrl} (proxied via ComfyUI)`);
 
     try {
