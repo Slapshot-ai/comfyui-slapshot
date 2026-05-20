@@ -60,6 +60,7 @@ app.registerExtension({
                 async () => { await _slapshotDownload(node, "hard_mattes"); }
             );
             hardMatteBtn.disabled = true;
+            hardMatteBtn.tooltip = "Hard Mattes can only be downloaded after inference completion";
             hardMatteBtn.serialize = false;
             node._hardMatteBtn = hardMatteBtn;
 
@@ -68,6 +69,7 @@ app.registerExtension({
                 async () => { await _slapshotDownload(node, "mb_mattes"); }
             );
             mbMatteBtn.disabled = true;
+            mbMatteBtn.tooltip = "MB Mattes can only be downloaded after inference completion";
             mbMatteBtn.serialize = false;
             node._mbMatteBtn = mbMatteBtn;
 
@@ -112,10 +114,12 @@ app.registerExtension({
                 if (this._hardMatteBtn) {
                     this._hardMatteBtn.name     = "⬇  Download Hard Mattes";
                     this._hardMatteBtn.disabled = false;
+                    this._hardMatteBtn.tooltip  = undefined;
                 }
                 if (this._mbMatteBtn) {
                     this._mbMatteBtn.name     = "⬇  Download MB Mattes";
                     this._mbMatteBtn.disabled = false;
+                    this._mbMatteBtn.tooltip  = undefined;
                 }
                 app.graph.setDirtyCanvas(true);
             }

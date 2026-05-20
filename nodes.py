@@ -27,6 +27,7 @@ MAX_POLL_SECONDS = 5 * 60 * 60  # 5 hours
 _MASK_FILENAME_RE = re.compile(r"^\d{5}\.png$")
 
 S3_OUTPUT_PREFIX = "comfyui-autopilot"
+JOB_SOURCE = "comfyui"
 
 
 # ── Download proxy (avoids browser CORS on the external API) ─────────────────
@@ -465,7 +466,7 @@ class SlapshotRotoscopingNode:
         if references:
             service["references_path"] = references
 
-        payload = {"assets": [{"source_path": video_key, "services": [service]}]}
+        payload = {"assets": [{"source_path": video_key, "services": [service]}], "job_source": JOB_SOURCE}
         progress("Submitting job...")
         print(f"[RotoscopingMasks] Payload: {json.dumps(payload, indent=2)}")
 
