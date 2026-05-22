@@ -5,10 +5,6 @@ description = "Slapshot rotoscoping node for ComfyUI — submits video jobs to t
 license = { file = "LICENSE" }
 dependencies = ["requests"]
 
-[[project.authors]]
-name = "Slapshot"
-email = "amritansh@slapshot.ai"
-
 [project.urls]
 Repository = "https://github.com/slapshot-ai/comfyui-slapshot"
 
