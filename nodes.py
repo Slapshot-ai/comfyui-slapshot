@@ -597,9 +597,9 @@ class SlapshotRotoscopingNode:
         if "error" in result_box:
             raise result_box["error"]
 
-        progress("Inference completed ✓")
+        progress("Inference completed ✓ Check your Email")
 
-        display = "Inference completed ✓"
+        display = "Inference completed ✓ Check your Email"
         print(f"[RotoscopingMasks] Done. job_id={job_id}")
 
         return {
