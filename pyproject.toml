@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-slapshot"
-version = "0.1.0"
+version = "0.1.2"
 description = "Slapshot rotoscoping node for ComfyUI — submits video jobs to the Slapshot API and reports completion."
 license = { file = "LICENSE" }
 dependencies = ["requests"]
