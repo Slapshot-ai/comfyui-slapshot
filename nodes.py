@@ -611,65 +611,11 @@ class SlapshotRotoscopingNode:
             "result": (),
         }
 
-
-# ── Load Mask node ────────────────────────────────────────────────────────────
-
-class SlapshotLoadMaskNode:
-    """
-    Load a mask image and validate its filename follows {num:05d}.png before
-    connecting it to the rotoscoping node.
-    """
-
-    CATEGORY = "Slapshot"
-    FUNCTION = "load_mask"
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("image",)
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        input_dir = folder_paths.get_input_directory()
-        files = sorted(
-            f for f in os.listdir(input_dir)
-            if os.path.isfile(os.path.join(input_dir, f))
-        )
-        return {
-            "required": {
-                "image": (files, {"image_upload": True}),
-            }
-        }
-
-    def load_mask(self, image):
-        import numpy as np
-        from PIL import Image, ImageOps
-
-        filename = os.path.basename(image)
-        if not _MASK_FILENAME_RE.match(filename):
-            raise ValueError(
-                f"[RotoscopingMasks] Mask filename '{filename}' does not match the required "
-                f"pattern '{{num:05d}}.png' (e.g. '00000.png'). "
-                f"Rename the file before loading it."
-            )
-
-        frame_number = int(os.path.splitext(filename)[0])
-
-        image_path = folder_paths.get_annotated_filepath(image)
-        img = Image.open(image_path)
-        img = ImageOps.exif_transpose(img)
-        img = img.convert("RGB")
-
-        arr = np.array(img).astype(np.float32) / 255.0
-        tensor = torch.from_numpy(arr).unsqueeze(0)  # (1, H, W, 3)
-        print(f"[RotoscopingMasks] Loaded mask '{filename}' — frame {frame_number}, shape {list(tensor.shape)}")
-        return (tensor,)
-
-
 # ── Registration ──────────────────────────────────────────────────────────────
 
 NODE_CLASS_MAPPINGS = {
     "Slapshot_Rotoscoping": SlapshotRotoscopingNode,
-    "Slapshot_Load_Mask":   SlapshotLoadMaskNode,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Slapshot_Rotoscoping": "Slapshot — Rotoscoping",
-    "Slapshot_Load_Mask":   "Slapshot — Load Mask",
 }
