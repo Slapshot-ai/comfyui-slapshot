@@ -18,7 +18,7 @@ Two halves, glued by ComfyUI's node-execution + extension system:
 2. `POST {BASE_URL}/api/jobs` with a payload of shape `{"assets": [{"source_path", "services": [{"type": "roto", "output_path", "references_path"}]}]}`, authenticated via `x-api-key` header. Extracts `job_id` from the response.
 3. Polls `GET {BASE_URL}/api/jobs/{job_id}` every 60s in a **background thread**, capped at 5 hours. The main thread blocks on `done_event.wait(timeout=5)` so ComfyUI can still process interrupts/signals between polls. Completion is detected when `total > 0 and total_pending == 0 and total_running == 0`. Result is delivered out-of-band (email); the node only returns a JSON summary string and pushes it to the UI via `{"ui": {"text": [...]}}`.
 
-`BASE_URL` is configurable via the `SLAPSHOT_BASE_URL` env var; default is `https://autopilot.slapshot.work`. 429 responses trigger an extra 60s backoff; transient network errors are logged and retried on the next poll tick. 401/403 on submit raise `PermissionError`; 401 during polling raises the same.
+`BASE_URL` is configurable via the `SLAPSHOT_BASE_URL` env var; default is `https://autopilot.slapshot.ai`. 429 responses trigger an extra 60s backoff; transient network errors are logged and retried on the next poll tick. 401/403 on submit raise `PermissionError`; 401 during polling raises the same.
 
 If `comfy.utils.ProgressBar` is importable, the poller pushes `percent_complete` into it — this is what drives the ComfyUI progress bar on the node.
 

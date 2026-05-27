@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-slapshot"
-version = "0.1.2"
+version = "0.1.3"
 description = "Slapshot rotoscoping node for ComfyUI — submits video jobs to the Slapshot API and reports completion."
 license = { file = "LICENSE" }
 dependencies = ["requests"]
@@ -11,4 +11,4 @@ Repository = "https://github.com/slapshot-ai/comfyui-slapshot"
 [tool.comfy]
 PublisherId = "slapshot"
 DisplayName = "Slapshot Rotoscoping"
-Icon = "https://slapshot.ai/icon.png"
+Icon = "https://hotspring-admin-uploads.s3.us-west-2.amazonaws.com/admin-public-media/ss-white-horizontal.png"

@@ -18,7 +18,7 @@ import torch
 import requests
 import folder_paths
 
-BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.work").rstrip("/")
+BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.ai").rstrip("/")
 
 POLL_INTERVAL_SECONDS = 60
 REQUEST_TIMEOUT = 30
