@@ -76,7 +76,46 @@ app.registerExtension({
             requestAnimationFrame(() => {
                 // Relabel the api_key widget
                 const apiKeyWidget = node.widgets?.find(w => w.name === "api_key");
-                if (apiKeyWidget) apiKeyWidget.label = "API key";
+                if (apiKeyWidget) {
+                    apiKeyWidget.label = "API key";
+                    apiKeyWidget.serialize = true;
+
+                    const STORAGE_KEY = "slapshot_api_key";
+                    const stored = localStorage.getItem(STORAGE_KEY);
+                    if (stored && !apiKeyWidget.value) apiKeyWidget.value = stored;
+
+                    const origCallback = apiKeyWidget.callback;
+                    apiKeyWidget.callback = function (v) {
+                        if (v) localStorage.setItem(STORAGE_KEY, v);
+                        else localStorage.removeItem(STORAGE_KEY);
+                        origCallback?.call(this, v);
+                    };
+                }
+
+                // "Get API key" — native anchor tag so browser handles cursor + click
+                const el = document.createElement("div");
+                el.style.cssText = "height:14px;display:flex;align-items:center;padding:0 6px;box-sizing:border-box;";
+                const a = document.createElement("a");
+                a.textContent = "Don't have an API key? Get it here";
+                a.href = "https://slapshot.ai/";
+                a.target = "_blank";
+                a.rel = "noopener";
+                a.style.cssText = "color:#99aaff;font-size:11px;text-decoration:underline;cursor:pointer;line-height:1;";
+                a.addEventListener("click", e => e.stopPropagation());
+                el.appendChild(a);
+
+                const linkWidget = node.addDOMWidget("api_key_link", "customLink", el, {
+                    serialize: false,
+                    getHeight: () => 14,
+                });
+
+                // Place link widget right after api_key
+                const apiKeyIdx = node.widgets.findIndex(w => w.name === "api_key");
+                const linkIdx   = node.widgets.indexOf(linkWidget);
+                if (apiKeyIdx >= 0 && linkIdx >= 0 && linkIdx !== apiKeyIdx + 1) {
+                    node.widgets.splice(linkIdx, 1);
+                    node.widgets.splice(apiKeyIdx + 1, 0, linkWidget);
+                }
 
                 // Title-case any mask inputs that exist at load time.
                 node.inputs?.forEach(inp => {
@@ -138,13 +177,9 @@ async function _slapshotDownload(node, exportType) {
         return;
     }
 
-    const apiKey = node.widgets?.find(w => w.name === "api_key")?.value;
-    if (!apiKey) {
-        alert("Slapshot: API key is not set on the node.");
-        return;
-    }
+    const apiKey = node.widgets?.find(w => w.name === "api_key")?.value ?? "";
 
-    const externalUrl = `${node._slapshotBaseUrl}/api/comfyui/${node._slapshotJobId}/result?export_type=${exportType}\`;`;
+    const externalUrl = `${node._slapshotBaseUrl}/api/comfyui/${node._slapshotJobId}/result?export_type=${exportType}`;
     console.log(`[Slapshot] download_result → GET ${externalUrl} (proxied via ComfyUI)`);
 
     try {
