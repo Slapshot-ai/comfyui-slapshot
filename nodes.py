@@ -738,16 +738,26 @@ class SlapshotTrackingNode:
                 }),
             },
             "optional": {
-                "metadata": ("STRING", {
-                    "default": "{}",
-                    "multiline": True,
-                    "placeholder": "Optional JSON metadata (leave as {} if none)",
-                }),
+                "working_fps":              ("STRING", {"default": "", "multiline": False, "placeholder": "e.g. 23.98"}),
+                "lens":                     ("STRING", {"default": "", "multiline": False, "placeholder": "focal length in mm"}),
+                "fix_focal_length":         (["False", "True"],),   # False = Floating, True = Fixed
+                "sensor_width":             ("STRING", {"default": "", "multiline": False, "placeholder": "sensor width in mm"}),
+                "sensor_height":            ("STRING", {"default": "", "multiline": False, "placeholder": "sensor height in mm"}),
+                "fix_sensor_size":          (["True", "False"],),    # True = Fixed (default), False = Floating
+                "estimated_closest_point":  ("STRING", {"default": "", "multiline": False, "placeholder": "closest depth in m"}),
+                "estimated_farthest_point": ("STRING", {"default": "", "multiline": False, "placeholder": "farthest depth in m"}),
+                "calculate_distortion":     (["False", "True"],),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    def run_tracking(self, video, api_key, metadata="{}", unique_id=None):
+    def run_tracking(self, video, api_key,
+                     working_fps="",
+                     lens="", fix_focal_length="False",
+                     sensor_width="", sensor_height="", fix_sensor_size="True",
+                     estimated_closest_point="", estimated_farthest_point="",
+                     calculate_distortion="False",
+                     unique_id=None):
         api_key = (api_key or "").strip()
         if not api_key or api_key.lower() == "none":
             api_key = _ENV_API_KEY
@@ -757,15 +767,44 @@ class SlapshotTrackingNode:
                 "Enter it in the node widget or set the SLAPSHOT_API_KEY environment variable."
             )
 
-        parsed_metadata = {}
-        raw = (metadata or "").strip()
-        if raw and raw != "{}":
+        def _parse_float(val, name):
+            v = (val or "").strip()
+            if not v:
+                return None
             try:
-                parsed_metadata = json.loads(raw)
-                if not isinstance(parsed_metadata, dict):
-                    raise ValueError("metadata must be a JSON object")
-            except (json.JSONDecodeError, ValueError) as exc:
-                raise ValueError(f"[Tracking] Invalid metadata JSON: {exc}")
+                return float(v)
+            except ValueError:
+                raise ValueError(f"[Tracking] {name} must be a number, got: {v!r}")
+
+        metadata = {}
+
+        fps_val = _parse_float(working_fps, "working_fps")
+        if fps_val is not None:
+            metadata["working_fps"] = fps_val
+
+        lens_val = _parse_float(lens, "lens")
+        if lens_val is not None:
+            metadata["lens"] = lens_val
+            metadata["fix_focal_length"] = fix_focal_length
+
+        sw = _parse_float(sensor_width, "sensor_width")
+        sh = _parse_float(sensor_height, "sensor_height")
+        if sw is not None or sh is not None:
+            if sw is None or sh is None:
+                raise ValueError("[Tracking] sensor_width and sensor_height must both be provided together.")
+            metadata["sensor_width"] = sw
+            metadata["sensor_height"] = sh
+            metadata["fix_sensor_size"] = fix_sensor_size
+
+        cp = _parse_float(estimated_closest_point, "estimated_closest_point")
+        if cp is not None:
+            metadata["estimated_closest_point"] = cp
+
+        fp = _parse_float(estimated_farthest_point, "estimated_farthest_point")
+        if fp is not None:
+            metadata["estimated_farthest_point"] = fp
+
+        metadata["calculate_distortion"] = calculate_distortion
 
         def progress(text: str):
             _send_progress(unique_id, text)
@@ -788,7 +827,7 @@ class SlapshotTrackingNode:
                 pass
 
         output_key = f"{S3_OUTPUT_PREFIX}/{upload_id}/output/"
-        service: dict = {"type": "tracking", "output_path": output_key, "metadata": parsed_metadata}
+        service: dict = {"type": "tracking", "output_path": output_key, "metadata": metadata}
 
         result = _submit_and_poll(api_key, video_key, service, upload_id, unique_id, "Tracking")
         job_id = result["job_id"]

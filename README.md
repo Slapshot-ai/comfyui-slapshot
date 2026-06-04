@@ -43,15 +43,25 @@ Generates a depth map video from a source video.
 
 ### Slapshot — Tracking
 
-Runs object tracking on a source video with optional JSON metadata parameters.
+Runs camera tracking on a source video with optional camera and scene parameters.
 
 **Inputs**
 
-| Input | Type | Description |
-|---|---|---|
-| `video` | VIDEO | Source video (`.mp4` or `.mov`) |
-| `api_key` | STRING | Your Slapshot API key |
-| `metadata` | STRING _(optional)_ | JSON object with tracking parameters. Leave as `{}` if none |
+| Input | Type | Default | Description                                                                                                  |
+|---|---|---|--------------------------------------------------------------------------------------------------------------|
+| `video` | VIDEO | — | Source video (`.mp4` or `.mov`)                                                                              |
+| `api_key` | STRING | — | Your Slapshot API key                                                                                        |
+| `working_fps` | STRING _(optional)_ | — | Working frames per second (e.g. `24.0`)                                                                      |
+| `lens` | STRING _(optional)_ | — | Lens focal length in mm                                                                                      |
+| `fix_focal_length` | COMBO _(optional)_ | `False` | `False` = Floating, `True` = Fixed                                                                           |
+| `sensor_width` | STRING _(optional)_ | — | Sensor width in mm (required if `sensor_height` is set)                                                      |
+| `sensor_height` | STRING _(optional)_ | — | Sensor height in mm (required if `sensor_width` is set)                                                      |
+| `fix_sensor_size` | COMBO _(optional)_ | `True` | `True` = Fixed, `False` = Floating                                                                           |
+| `estimated_closest_point` | STRING _(optional)_ | — | Estimated distance from the camera to the closest point you are tracking. Rough estimate will do. In metres  |
+| `estimated_farthest_point` | STRING _(optional)_ | — | Estimated distance from the camera to the farthest point you are tracking. Rough estimate will do. In metres |
+| `calculate_distortion` | COMBO _(optional)_ | `False` | `True` = Turn this on to calculate lens distortion in your camera solve. We will provide ST maps with your export for the distortion used.                                             |
+
+All camera fields are optional. `sensor_width` and `sensor_height` must be provided together.
 
 **Download buttons (enabled after inference)**
 

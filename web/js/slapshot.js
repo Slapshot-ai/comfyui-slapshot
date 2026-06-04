@@ -161,6 +161,50 @@ app.registerExtension({
                     }
                 }
 
+                if (nodeData.name === "Slapshot_Tracking") {
+                    const TRACKING_LABELS = {
+                        "working_fps":              "Working FPS",
+                        "lens":                     "Lens (mm)",
+                        "fix_focal_length":         "Fix Focal Length  [False=Floating, True=Fixed]",
+                        "sensor_width":             "Sensor Width (mm)",
+                        "sensor_height":            "Sensor Height (mm)",
+                        "fix_sensor_size":          "Fix Sensor Size  [True=Fixed, False=Floating]",
+                        "estimated_closest_point":  "Estimated Closest Point (m)",
+                        "estimated_farthest_point": "Estimated Farthest Point (m)",
+                        "calculate_distortion":     "Calculate Distortion",
+                    };
+                    node.widgets?.forEach(w => {
+                        if (TRACKING_LABELS[w.name]) w.label = TRACKING_LABELS[w.name];
+                    });
+
+                    // Numeric string fields should never hold "True"/"False" —
+                    // reset them if a positional workflow-restore corrupted them.
+                    const NUMERIC_FIELDS = new Set([
+                        "working_fps", "lens", "sensor_width", "sensor_height",
+                        "estimated_closest_point", "estimated_farthest_point",
+                    ]);
+                    const COMBO_DEFAULTS = {
+                        "fix_focal_length":     "False",
+                        "fix_sensor_size":      "True",
+                        "calculate_distortion": "False",
+                    };
+                    const COMBO_OPTIONS = {
+                        "fix_focal_length":     ["False", "True"],
+                        "fix_sensor_size":      ["True", "False"],
+                        "calculate_distortion": ["False", "True"],
+                    };
+                    node.widgets?.forEach(w => {
+                        if (NUMERIC_FIELDS.has(w.name)) {
+                            const v = (w.value || "").trim();
+                            if (v !== "" && isNaN(Number(v))) w.value = "";
+                        } else if (COMBO_DEFAULTS[w.name] !== undefined) {
+                            if (!COMBO_OPTIONS[w.name].includes(w.value)) {
+                                w.value = COMBO_DEFAULTS[w.name];
+                            }
+                        }
+                    });
+                }
+
                 _setNodeSize(node);
             });
         };
