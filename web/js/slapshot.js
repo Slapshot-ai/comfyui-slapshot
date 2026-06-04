@@ -7,7 +7,40 @@ const PREVIEW_NODES = [
     "Slapshot_Rotoscoping_Download",
     "Slapshot_Rotoscoping_Masks",
     "Slapshot_Dynamic_Masks_Test",
+    "Slapshot_Depth_Map",
+    "Slapshot_Tracking",
 ];
+
+const NODE_DOWNLOADS = {
+    "Slapshot_Rotoscoping":         [
+        { label: "Download Hard Mattes", exportType: "hard_mattes" },
+        { label: "Download MB Mattes",   exportType: "mb_mattes" },
+    ],
+    "Slapshot_Rotoscoping_Download": [
+        { label: "Download Hard Mattes", exportType: "hard_mattes" },
+        { label: "Download MB Mattes",   exportType: "mb_mattes" },
+    ],
+    "Slapshot_Rotoscoping_Masks":    [
+        { label: "Download Hard Mattes", exportType: "hard_mattes" },
+        { label: "Download MB Mattes",   exportType: "mb_mattes" },
+    ],
+    "Slapshot_Dynamic_Masks_Test":   [
+        { label: "Download Hard Mattes", exportType: "hard_mattes" },
+        { label: "Download MB Mattes",   exportType: "mb_mattes" },
+    ],
+    "Slapshot_Depth_Map":           [
+        {
+            label: "Download Depth Map",
+            exportType: (node) => {
+                const val = node.widgets?.find(w => w.name === "export_type")?.value ?? "MOV";
+                return val === "JPG" ? "jpg" : "mov";
+            },
+        },
+    ],
+    "Slapshot_Tracking":             [
+        { label: "Download Tracking Data", exportType: "tracking" },
+    ],
+};
 
 // ── Real-time progress updates from Python ────────────────────────────────────
 
@@ -55,23 +88,20 @@ app.registerExtension({
             widget.serialize = false;
 
             // ── Download buttons (disabled until inference completes) ──────────
-            const hardMatteBtn = node.addWidget(
-                "button", "Download Hard Mattes", null,
-                async () => { await _slapshotDownload(node, "hard_mattes"); }
-            );
-            hardMatteBtn.disabled = true;
-            hardMatteBtn.tooltip = "Hard Mattes can only be downloaded after inference completion";
-            hardMatteBtn.serialize = false;
-            node._hardMatteBtn = hardMatteBtn;
-
-            const mbMatteBtn = node.addWidget(
-                "button", "Download MB Mattes", null,
-                async () => { await _slapshotDownload(node, "mb_mattes"); }
-            );
-            mbMatteBtn.disabled = true;
-            mbMatteBtn.tooltip = "MB Mattes can only be downloaded after inference completion";
-            mbMatteBtn.serialize = false;
-            node._mbMatteBtn = mbMatteBtn;
+            node._downloadBtns = (NODE_DOWNLOADS[nodeData.name] ?? []).map(({ label, exportType }) => {
+                const btn = node.addWidget(
+                    "button", label, null,
+                    async () => {
+                        const et = typeof exportType === "function" ? exportType(node) : exportType;
+                        await _slapshotDownload(node, et);
+                    }
+                );
+                btn.disabled = true;
+                btn.tooltip = `${label} can only be downloaded after inference completion`;
+                btn.serialize = false;
+                btn._enabledLabel = "⬇  " + label;
+                return btn;
+            });
 
             requestAnimationFrame(() => {
                 // Relabel the api_key widget
@@ -123,6 +153,14 @@ app.registerExtension({
                         inp.label = "Mask_" + inp.name.slice(5);
                 });
 
+                const exportTypeWidget = node.widgets?.find(w => w.name === "export_type");
+                if (exportTypeWidget) {
+                    exportTypeWidget.label = "Export Type";
+                    if (!["JPG", "MOV"].includes(exportTypeWidget.value)) {
+                        exportTypeWidget.value = "JPG";
+                    }
+                }
+
                 _setNodeSize(node);
             });
         };
@@ -150,15 +188,10 @@ app.registerExtension({
                 this._slapshotReady    = true;
                 this._inferenceRunning = false;
 
-                if (this._hardMatteBtn) {
-                    this._hardMatteBtn.name     = "⬇  Download Hard Mattes";
-                    this._hardMatteBtn.disabled = false;
-                    this._hardMatteBtn.tooltip  = undefined;
-                }
-                if (this._mbMatteBtn) {
-                    this._mbMatteBtn.name     = "⬇  Download MB Mattes";
-                    this._mbMatteBtn.disabled = false;
-                    this._mbMatteBtn.tooltip  = undefined;
+                for (const btn of (this._downloadBtns ?? [])) {
+                    btn.name     = btn._enabledLabel;
+                    btn.disabled = false;
+                    btn.tooltip  = undefined;
                 }
                 app.graph.setDirtyCanvas(true);
             }

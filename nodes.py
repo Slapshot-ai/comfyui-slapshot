@@ -40,7 +40,8 @@ def _load_dotenv():
 
 _load_dotenv()
 
-BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.ai").rstrip("/")
+# BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.ai").rstrip("/")
+BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.work").rstrip("/")
 _ENV_API_KEY = os.environ.get("SLAPSHOT_API_KEY", "").strip()
 
 POLL_INTERVAL_SECONDS = 60
@@ -372,6 +373,147 @@ def _headers(api_key: str) -> dict:
     }
 
 
+# ── Shared submit + poll ──────────────────────────────────────────────────────
+
+def _submit_and_poll(api_key: str, video_key: str, service_payload: dict,
+                     upload_id: str, unique_id, log_prefix: str) -> dict:
+    """Submit a job and block until it completes. Returns the final result dict."""
+
+    def progress(text: str):
+        _send_progress(unique_id, text)
+
+    submit_url = f"{BASE_URL}/api/jobs"
+    payload = {
+        "assets": [{"source_path": video_key, "services": [service_payload]}],
+        "job_source": JOB_SOURCE,
+    }
+    
+    progress("Submitting job...")
+    print(f"[{log_prefix}] Payload: {json.dumps(payload, indent=2)}")
+
+    resp = None
+    try:
+        resp = requests.post(submit_url, json=payload, headers=_headers(api_key),
+                             timeout=REQUEST_TIMEOUT)
+        print(f"[{log_prefix}] Submission response: {resp.status_code} {resp.text[:300]}")
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError:
+        code = resp.status_code
+        if code == 401:
+            raise PermissionError(f"[{log_prefix}] Invalid API key (401).")
+        if code == 403:
+            raise PermissionError(f"[{log_prefix}] API key lacks permission (403).")
+        raise RuntimeError(f"[{log_prefix}] Job submission failed ({code}): {resp.text[:300]}")
+    except requests.exceptions.ConnectionError:
+        raise RuntimeError(f"[{log_prefix}] Cannot reach {BASE_URL} — check your network.")
+    except requests.exceptions.Timeout:
+        raise RuntimeError(f"[{log_prefix}] Job submission timed out.")
+
+    submit_data = resp.json()
+    job_id = submit_data.get("job_id")
+    if not job_id:
+        raise RuntimeError(f"[{log_prefix}] Unexpected response — no job_id: {resp.text[:300]}")
+    print(f"[{log_prefix}] Job submitted. job_id={job_id}")
+    progress("Job submitted. Waiting for inference to start...")
+
+    status_url = f"{BASE_URL}/api/jobs/{job_id}"
+
+    try:
+        from comfy.utils import ProgressBar
+        pbar = ProgressBar(100)
+    except ImportError:
+        pbar = None
+
+    done_event = threading.Event()
+    result_box: dict = {}
+
+    def _poll():
+        poll_num = 0
+        poll_start = time.monotonic()
+
+        while True:
+            time.sleep(POLL_INTERVAL_SECONDS)
+            poll_num += 1
+
+            if time.monotonic() - poll_start > MAX_POLL_SECONDS:
+                result_box["error"] = RuntimeError(
+                    f"[{log_prefix}] Job {job_id} did not complete within 5 hours "
+                    f"({poll_num} polls). Giving up."
+                )
+                done_event.set()
+                return
+
+            try:
+                poll_resp = requests.get(status_url, headers=_headers(api_key),
+                                         timeout=REQUEST_TIMEOUT)
+            except requests.exceptions.RequestException as e:
+                print(f"[{log_prefix}] Network error on poll #{poll_num} (will retry): {e}")
+                continue
+
+            if poll_resp.status_code == 429:
+                print(f"[{log_prefix}] Rate limited — backing off one extra minute...")
+                time.sleep(60)
+                continue
+
+            try:
+                poll_resp.raise_for_status()
+            except requests.exceptions.HTTPError:
+                code = poll_resp.status_code
+                if code == 401:
+                    result_box["error"] = PermissionError(f"[{log_prefix}] Invalid API key (401).")
+                else:
+                    result_box["error"] = RuntimeError(
+                        f"[{log_prefix}] Status check failed ({code}): {poll_resp.text[:300]}"
+                    )
+                done_event.set()
+                return
+
+            data = poll_resp.json()
+            percent   = data.get("percent_complete", 0)
+            total     = data.get("total", 0)
+            pending   = data.get("total_pending", 0)
+            running   = data.get("total_running", 0)
+            completed = data.get("total_completed", 0)
+            failed    = data.get("total_failed", 0)
+            cancelled = data.get("total_cancelled", 0)
+
+            if pbar is not None:
+                pbar.update_absolute(percent)
+
+            progress(f"Running inference... {percent}% complete")
+
+            if total > 0 and pending == 0 and running == 0:
+                if completed == 0:
+                    result_box["error"] = RuntimeError(
+                        f"[{log_prefix}] Inference failed — "
+                        f"{failed} failed, {cancelled} cancelled out of {total}."
+                    )
+                    done_event.set()
+                    return
+
+                result_box["value"] = {
+                    "status": "complete" if completed == total else "partial",
+                    "percent_complete": percent,
+                    "job_id": job_id,
+                }
+                done_event.set()
+                return
+
+    t = threading.Thread(target=_poll, daemon=True)
+    t.start()
+
+    while not done_event.wait(timeout=5):
+        pass
+
+    if "error" in result_box:
+        raise result_box["error"]
+
+    progress("Inference completed ✓ Check your Email")
+    print(f"[{log_prefix}] Done. job_id={job_id}")
+
+    return result_box["value"]
+
+
 # ── Node ──────────────────────────────────────────────────────────────────────
 
 class SlapshotRotoscopingNode:
@@ -487,163 +629,189 @@ class SlapshotRotoscopingNode:
         if total_masks:
             progress(f"All {total_masks} mask(s) uploaded ✓")
 
-        # ── Submit job ────────────────────────────────────────────────────────
-        submit_url = f"{BASE_URL}/api/jobs"
+        # ── Submit job and poll ───────────────────────────────────────────────
         output_key = f"{S3_OUTPUT_PREFIX}/{upload_id}/output/"
         service: dict = {"type": "roto", "output_path": output_key}
         if references:
             service["references_path"] = references
 
-        payload = {"assets": [{"source_path": video_key, "services": [service]}], "job_source": JOB_SOURCE}
-        progress("Submitting job...")
-        print(f"[RotoscopingMasks] Payload: {json.dumps(payload, indent=2)}")
-
-        resp = None
-        try:
-            resp = requests.post(
-                submit_url,
-                json=payload,
-                headers=_headers(api_key),
-                timeout=REQUEST_TIMEOUT,
-            )
-            print(f"[RotoscopingMasks] Submission response: {resp.status_code} {resp.text[:300]}")
-            resp.raise_for_status()
-        except requests.exceptions.HTTPError:
-            code = resp.status_code
-            if code == 401:
-                raise PermissionError("[RotoscopingMasks] Invalid API key (401).")
-            if code == 403:
-                raise PermissionError("[RotoscopingMasks] API key lacks permission (403).")
-            raise RuntimeError(f"[RotoscopingMasks] Job submission failed ({code}): {resp.text[:300]}")
-        except requests.exceptions.ConnectionError:
-            raise RuntimeError(f"[RotoscopingMasks] Cannot reach {BASE_URL} — check your network.")
-        except requests.exceptions.Timeout:
-            raise RuntimeError("[RotoscopingMasks] Job submission timed out.")
-
-        submit_data = resp.json()
-        job_id = submit_data.get("job_id")
-        if not job_id:
-            raise RuntimeError(
-                f"[RotoscopingMasks] Unexpected response — no job_id: {resp.text[:300]}"
-            )
-        print(f"[RotoscopingMasks] Job submitted. job_id={job_id}")
-        progress("Job submitted. Waiting for inference to start...")
-
-        # ── Poll for completion (background thread) ───────────────────────────
-        status_url = f"{BASE_URL}/api/jobs/{job_id}"
-
-        try:
-            from comfy.utils import ProgressBar
-            pbar = ProgressBar(100)
-        except ImportError:
-            pbar = None
-
-        done_event = threading.Event()
-        result_box: dict = {}
-
-        def _poll():
-            poll_num = 0
-            poll_start = time.monotonic()
-
-            while True:
-                time.sleep(POLL_INTERVAL_SECONDS)
-                poll_num += 1
-
-                elapsed = time.monotonic() - poll_start
-                if elapsed > MAX_POLL_SECONDS:
-                    result_box["error"] = RuntimeError(
-                        f"[RotoscopingMasks] Job {job_id} did not complete within 5 hours "
-                        f"({poll_num} polls). Giving up."
-                    )
-                    done_event.set()
-                    return
-
-                try:
-                    poll_resp = requests.get(
-                        status_url,
-                        headers=_headers(api_key),
-                        timeout=REQUEST_TIMEOUT,
-                    )
-                except requests.exceptions.RequestException as e:
-                    print(f"[RotoscopingMasks] Network error on poll #{poll_num} (will retry): {e}")
-                    continue
-
-                if poll_resp.status_code == 429:
-                    print("[RotoscopingMasks] Rate limited — backing off one extra minute...")
-                    time.sleep(60)
-                    continue
-
-                try:
-                    poll_resp.raise_for_status()
-                except requests.exceptions.HTTPError:
-                    code = poll_resp.status_code
-                    if code == 401:
-                        result_box["error"] = PermissionError("[RotoscopingMasks] Invalid API key (401).")
-                    else:
-                        result_box["error"] = RuntimeError(
-                            f"[RotoscopingMasks] Status check failed ({code}): {poll_resp.text[:300]}"
-                        )
-                    done_event.set()
-                    return
-
-                data = poll_resp.json()
-                percent   = data.get("percent_complete", 0)
-                total     = data.get("total", 0)
-                pending   = data.get("total_pending", 0)
-                running   = data.get("total_running", 0)
-                completed = data.get("total_completed", 0)
-                failed    = data.get("total_failed", 0)
-                cancelled = data.get("total_cancelled", 0)
-
-                if pbar is not None:
-                    pbar.update_absolute(percent)
-
-                progress(f"Running inference... {percent}% complete")
-
-                if total > 0 and pending == 0 and running == 0:
-                    if completed == 0:
-                        result_box["error"] = RuntimeError(
-                            f"[RotoscopingMasks] Inference failed — "
-                            f"{failed} failed, {cancelled} cancelled out of {total}."
-                        )
-                        done_event.set()
-                        return
-
-                    result_box["value"] = {
-                        "status": "complete" if completed == total else "partial",
-                        "percent_complete": percent,
-                    }
-                    done_event.set()
-                    return
-
-        t = threading.Thread(target=_poll, daemon=True)
-        t.start()
-
-        while not done_event.wait(timeout=5):
-            pass
-
-        if "error" in result_box:
-            raise result_box["error"]
-
-        progress("Inference completed ✓ Check your Email")
-
-        display = "Inference completed ✓ Check your Email"
-        print(f"[RotoscopingMasks] Done. job_id={job_id}")
+        result = _submit_and_poll(api_key, video_key, service, upload_id, unique_id, "RotoscopingMasks")
+        job_id = result["job_id"]
 
         return {
             "ui": {
-                "text":     [display],
+                "text":     ["Inference completed ✓ Check your Email"],
                 "job_id":   [job_id],
                 "base_url": [BASE_URL],
             },
             "result": (),
         }
 
+class SlapshotDepthMapNode:
+    CATEGORY = "Slapshot"
+    FUNCTION = "run_depth_map"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video": ("VIDEO",),
+                "export_type": (["JPG", "MOV"],),
+                "api_key": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "placeholder": "your-api-key (or set SLAPSHOT_API_KEY env var)",
+                }),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    def run_depth_map(self, video, export_type="JPG", api_key="", unique_id=None):
+        api_key = (api_key or "").strip()
+        if not api_key or api_key.lower() == "none":
+            api_key = _ENV_API_KEY
+        if not api_key:
+            raise ValueError(
+                "[DepthMap] API Key is required. "
+                "Enter it in the node widget or set the SLAPSHOT_API_KEY environment variable."
+            )
+
+        def progress(text: str):
+            _send_progress(unique_id, text)
+
+        upload_id = str(uuid.uuid4())
+        print(f"[DepthMap] Upload ID: {upload_id}")
+
+        video_local, video_filename = _save_video_locally(video)
+        try:
+            progress(f"Uploading video: {video_filename}...")
+            upload_url, video_key = _get_presigned_upload_url(
+                BASE_URL, api_key, upload_id, "video", video_filename
+            )
+            _upload_to_presigned_url(upload_url, video_local)
+            progress("Video uploaded ✓")
+        finally:
+            try:
+                os.unlink(video_local)
+            except OSError:
+                pass
+
+        export_type_clean = export_type.strip().upper()
+        if export_type_clean not in ("JPG", "MOV"):
+            export_type_clean = "JPG"
+
+        output_key = f"{S3_OUTPUT_PREFIX}/{upload_id}/output/"
+        service = {"type": "depth_map", "output_path": output_key, "export_type": export_type_clean.lower()}
+
+        result = _submit_and_poll(api_key, video_key, service, upload_id, unique_id, "DepthMap")
+        job_id = result["job_id"]
+
+        return {
+            "ui": {
+                "text":     ["Inference completed ✓ Check your Email"],
+                "job_id":   [job_id],
+                "base_url": [BASE_URL],
+            },
+            "result": (),
+        }
+
+
+class SlapshotTrackingNode:
+    CATEGORY = "Slapshot"
+    FUNCTION = "run_tracking"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video": ("VIDEO",),
+                "api_key": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "placeholder": "your-api-key (or set SLAPSHOT_API_KEY env var)",
+                }),
+            },
+            "optional": {
+                "metadata": ("STRING", {
+                    "default": "{}",
+                    "multiline": True,
+                    "placeholder": "Optional JSON metadata (leave as {} if none)",
+                }),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    def run_tracking(self, video, api_key, metadata="{}", unique_id=None):
+        api_key = (api_key or "").strip()
+        if not api_key or api_key.lower() == "none":
+            api_key = _ENV_API_KEY
+        if not api_key:
+            raise ValueError(
+                "[Tracking] API Key is required. "
+                "Enter it in the node widget or set the SLAPSHOT_API_KEY environment variable."
+            )
+
+        parsed_metadata = {}
+        raw = (metadata or "").strip()
+        if raw and raw != "{}":
+            try:
+                parsed_metadata = json.loads(raw)
+                if not isinstance(parsed_metadata, dict):
+                    raise ValueError("metadata must be a JSON object")
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise ValueError(f"[Tracking] Invalid metadata JSON: {exc}")
+
+        def progress(text: str):
+            _send_progress(unique_id, text)
+
+        upload_id = str(uuid.uuid4())
+        print(f"[Tracking] Upload ID: {upload_id}")
+
+        video_local, video_filename = _save_video_locally(video)
+        try:
+            progress(f"Uploading video: {video_filename}...")
+            upload_url, video_key = _get_presigned_upload_url(
+                BASE_URL, api_key, upload_id, "video", video_filename
+            )
+            _upload_to_presigned_url(upload_url, video_local)
+            progress("Video uploaded ✓")
+        finally:
+            try:
+                os.unlink(video_local)
+            except OSError:
+                pass
+
+        output_key = f"{S3_OUTPUT_PREFIX}/{upload_id}/output/"
+        service: dict = {"type": "tracking", "output_path": output_key, "metadata": parsed_metadata}
+
+        result = _submit_and_poll(api_key, video_key, service, upload_id, unique_id, "Tracking")
+        job_id = result["job_id"]
+
+        return {
+            "ui": {
+                "text":     ["Inference completed ✓ Check your Email"],
+                "job_id":   [job_id],
+                "base_url": [BASE_URL],
+            },
+            "result": (),
+        }
+
+
 # ── Registration ──────────────────────────────────────────────────────────────
 
 NODE_CLASS_MAPPINGS = {
     "Slapshot_Rotoscoping": SlapshotRotoscopingNode,
+    "Slapshot_Depth_Map":  SlapshotDepthMapNode,
+    "Slapshot_Tracking":    SlapshotTrackingNode,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Slapshot_Rotoscoping": "Slapshot — Rotoscoping",
+    "Slapshot_Depth_Map":  "Slapshot — Depth Map",
+    "Slapshot_Tracking":    "Slapshot — Tracking",
 }
