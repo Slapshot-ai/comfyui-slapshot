@@ -28,7 +28,7 @@ The node outputs a `status_message` string with a JSON summary:
 ```json
 {
   "status": "complete",
-  "message": "Check your email for the output path.",
+  "message": "Inference completed ✓ Check your Email",
   "percent_complete": 100,
   "total": 1,
   "total_completed": 1,
