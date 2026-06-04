@@ -10,6 +10,7 @@ The **Slapshot — Rotoscoping** node automates the full rotoscoping pipeline:
 2. **Submits** a rotoscoping job to the Slapshot API, attaching your video and any reference mask frames.
 3. **Polls** the job status every 60 seconds (up to 5 hours) and shows live progress in the ComfyUI console.
 4. **Displays** a completion summary directly on the node once the job finishes. Results are delivered to the email associated with your API key.
+5. **Download** Hard Mattes or MB Mattes directly from the node using the download buttons that activate after inference completes.
 
 ## Inputs
 
@@ -35,6 +36,11 @@ The node outputs a `status_message` string with a JSON summary:
   "total_cancelled": 0
 }
 ```
+
+Once inference completes, two download buttons appear on the node:
+
+- **Download Hard Mattes** — downloads a zip of binary alpha masks for each frame.
+- **Download MB Mattes** — downloads a zip of motion-blur-aware mattes for each frame.
 
 ## Installation
 
