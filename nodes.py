@@ -18,7 +18,30 @@ import torch
 import requests
 import folder_paths
 
+def _load_dotenv():
+    """Load variables from ComfyUI's .env file into os.environ if not already set."""
+    try:
+        base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        env_path = os.path.join(base, ".env")
+        if not os.path.isfile(env_path):
+            return
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except Exception as exc:
+        print(f"[RotoscopingMasks] Could not load .env: {exc}")
+
+_load_dotenv()
+
 BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.ai").rstrip("/")
+_ENV_API_KEY = os.environ.get("SLAPSHOT_API_KEY", "").strip()
 
 POLL_INTERVAL_SECONDS = 60
 REQUEST_TIMEOUT = 30
@@ -45,7 +68,7 @@ try:
 
         job_id      = body.get("job_id", "").strip()
         export_type = body.get("export_type", "").strip()
-        api_key     = body.get("api_key", "").strip()
+        api_key     = body.get("api_key", "").strip() or _ENV_API_KEY
         base_url    = body.get("base_url", BASE_URL).rstrip("/")
 
         if not job_id or not export_type or not api_key:
@@ -367,8 +390,8 @@ class SlapshotRotoscopingNode:
                 "api_key": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": "your-api-key",
-                    "password": True,
+                    "placeholder": "your-api-key (or set SLAPSHOT_API_KEY env var)",
+                    # "password": True,
                 }),
             },
             "optional": optional,
@@ -378,7 +401,12 @@ class SlapshotRotoscopingNode:
     def run_rotoscoping_with_masks(self, video, api_key, unique_id=None, prompt=None, **kwargs):
         api_key = (api_key or "").strip()
         if not api_key or api_key.lower() == "none":
-            raise ValueError("[RotoscopingMasks] API Key is required.")
+            api_key = _ENV_API_KEY
+        if not api_key:
+            raise ValueError(
+                "[RotoscopingMasks] API Key is required. "
+                "Enter it in the node widget or set the SLAPSHOT_API_KEY environment variable."
+            )
 
         def progress(text: str):
             _send_progress(unique_id, text)
