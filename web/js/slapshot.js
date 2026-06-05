@@ -9,6 +9,7 @@ const PREVIEW_NODES = [
     "Slapshot_Dynamic_Masks_Test",
     "Slapshot_Depth_Map",
     "Slapshot_Tracking",
+    "Slapshot_Smart_Vectors",
 ];
 
 const NODE_DOWNLOADS = {
@@ -39,6 +40,9 @@ const NODE_DOWNLOADS = {
     ],
     "Slapshot_Tracking":             [
         { label: "Download Tracking Data", exportType: "tracking" },
+    ],
+    "Slapshot_Smart_Vectors":        [
+        { label: "Download Smart Vectors", exportType: "exr" },
     ],
 };
 
@@ -159,6 +163,13 @@ app.registerExtension({
                     if (!["JPG", "MOV"].includes(exportTypeWidget.value)) {
                         exportTypeWidget.value = "JPG";
                     }
+                }
+
+                if (nodeData.name === "Slapshot_Smart_Vectors") {
+                    const roiInput = node.inputs?.find(inp => inp.name === "mask");
+                    if (roiInput) roiInput.label = "ROI Mask";
+                    const kf = node.widgets?.find(w => w.name === "keyframe");
+                    if (kf) kf.label = "ROI Mask Keyframe";
                 }
 
                 if (nodeData.name === "Slapshot_Tracking") {

@@ -827,9 +827,167 @@ class SlapshotTrackingNode:
                 pass
 
         output_key = f"{S3_OUTPUT_PREFIX}/{upload_id}/output/"
-        service: dict = {"type": "tracking", "output_path": output_key, "metadata": metadata}
+        service: dict = {"type": "tracking", "output_path": output_key}
+        if metadata is not None:
+            service["metadata"] = metadata
 
         result = _submit_and_poll(api_key, video_key, service, upload_id, unique_id, "Tracking")
+        job_id = result["job_id"]
+
+        return {
+            "ui": {
+                "text":     ["Inference completed ✓ Check your Email"],
+                "job_id":   [job_id],
+                "base_url": [BASE_URL],
+            },
+            "result": (),
+        }
+
+
+class SlapshotSmartVectorsNode:
+    CATEGORY = "Slapshot"
+    FUNCTION = "run_smart_vectors"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video": ("VIDEO",),
+                "api_key": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "placeholder": "your-api-key (or set SLAPSHOT_API_KEY env var)",
+                }),
+            },
+            "optional": {
+                "mask": ("IMAGE",),
+                "keyframe": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "placeholder": "frame number (required with ROI Mask)",
+                }),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID", "prompt": "PROMPT"},
+        }
+
+    def run_smart_vectors(self, video, api_key, mask=None, keyframe="", unique_id=None, prompt=None):
+        api_key = (api_key or "").strip()
+        if not api_key or api_key.lower() == "none":
+            api_key = _ENV_API_KEY
+        if not api_key:
+            raise ValueError(
+                "[SmartVectors] API Key is required. "
+                "Enter it in the node widget or set the SLAPSHOT_API_KEY environment variable."
+            )
+
+        has_mask = mask is not None
+        kf_str = (keyframe or "").strip()
+        kf = None
+        if kf_str:
+            try:
+                kf = int(kf_str)
+                if kf < 1:
+                    raise ValueError
+            except ValueError:
+                raise ValueError(
+                    f"[SmartVectors] keyframe must be a positive integer (≥ 1), got: {kf_str!r}"
+                )
+
+        if has_mask and kf is None:
+            raise ValueError(
+                "[SmartVectors] A keyframe number is required when an ROI Mask is connected."
+            )
+        if kf is not None and not has_mask:
+            raise ValueError(
+                "[SmartVectors] An ROI Mask must be connected when a keyframe is specified."
+            )
+
+        # ── Validate ROI mask filename before any upload ───────────────────────
+        # Keyframe is 1-indexed; mask filename must be keyframe - 1 (0-indexed).
+        png_name = None
+        if has_mask:
+            png_name = _mask_filename_from_prompt(unique_id, prompt, "mask")
+            if png_name is None:
+                raise ValueError(
+                    "[SmartVectors] Could not determine the ROI mask filename. "
+                    "Connect the mask from a Load Image node whose file is named "
+                    "with a 5-digit frame number, e.g. '00018.png'."
+                )
+            mask_frame = int(os.path.splitext(png_name)[0])
+            if mask_frame != kf - 1:
+                raise ValueError(
+                    f"[SmartVectors] Mask '{png_name}' is frame {mask_frame} (0-indexed) "
+                    f"but keyframe {kf} expects mask frame {kf - 1} (0-indexed). "
+                    f"Either use mask '{kf - 1:05d}.png' or set keyframe to {mask_frame + 1}."
+                )
+            print(f"[SmartVectors] ROI mask validated: {png_name} (keyframe={kf})")
+
+        def progress(text: str):
+            _send_progress(unique_id, text)
+
+        upload_id = str(uuid.uuid4())
+        print(f"[SmartVectors] Upload ID: {upload_id}")
+
+        # ── Upload video ──────────────────────────────────────────────────────
+        video_local, video_filename = _save_video_locally(video)
+        video_key = None
+        try:
+            progress(f"Uploading video: {video_filename}...")
+            upload_url, video_key = _get_presigned_upload_url(
+                BASE_URL, api_key, upload_id, "video", video_filename
+            )
+            _upload_to_presigned_url(upload_url, video_local)
+            progress("Video uploaded ✓")
+        finally:
+            try:
+                os.unlink(video_local)
+            except OSError:
+                pass
+
+        # ── Upload ROI mask if provided ───────────────────────────────────────
+        roi_metadata = None
+        if has_mask:
+            frame = next(_iter_image_frames(mask))
+
+            import numpy as np
+            from PIL import Image as _Image
+            arr = frame.detach().cpu().numpy() if hasattr(frame, "detach") else np.asarray(frame)
+            arr = (arr.clip(0.0, 1.0) * 255.0).astype("uint8")
+            if arr.ndim == 2:
+                img = _Image.fromarray(arr, mode="L").convert("RGB")
+            elif arr.shape[-1] == 4:
+                img = _Image.fromarray(arr, mode="RGBA").convert("RGB")
+            else:
+                img = _Image.fromarray(arr, mode="RGB")
+
+            fd, local_path = tempfile.mkstemp(suffix=f"_{png_name}", prefix="slapshot_roi_")
+            print(f"[SmartVectors] ROI mask source filename: {png_name}, keyframe in metadata: {kf}")
+            os.close(fd)
+            img.save(local_path)
+
+            try:
+                progress(f"Uploading ROI mask: {png_name}...")
+                upload_url, mask_key = _get_presigned_upload_url(
+                    BASE_URL, api_key, upload_id, "mask", png_name
+                )
+                _upload_to_presigned_url(upload_url, local_path)
+                roi_metadata = {"roi_mask_path": mask_key, "keyframe": kf}
+                progress("ROI mask uploaded ✓")
+            finally:
+                try:
+                    os.unlink(local_path)
+                except OSError:
+                    pass
+
+        output_key = f"{S3_OUTPUT_PREFIX}/{upload_id}/output/"
+        service: dict = {"type": "smart_vectors", "output_path": output_key}
+        if roi_metadata is not None:
+            service["metadata"] = roi_metadata
+
+        result = _submit_and_poll(api_key, video_key, service, upload_id, unique_id, "SmartVectors")
         job_id = result["job_id"]
 
         return {
@@ -845,12 +1003,14 @@ class SlapshotTrackingNode:
 # ── Registration ──────────────────────────────────────────────────────────────
 
 NODE_CLASS_MAPPINGS = {
-    "Slapshot_Rotoscoping": SlapshotRotoscopingNode,
-    "Slapshot_Depth_Map":  SlapshotDepthMapNode,
-    "Slapshot_Tracking":    SlapshotTrackingNode,
+    "Slapshot_Rotoscoping":    SlapshotRotoscopingNode,
+    "Slapshot_Depth_Map":      SlapshotDepthMapNode,
+    "Slapshot_Tracking":       SlapshotTrackingNode,
+    "Slapshot_Smart_Vectors":  SlapshotSmartVectorsNode,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Slapshot_Rotoscoping": "Slapshot — Rotoscoping",
-    "Slapshot_Depth_Map":  "Slapshot — Depth Map",
-    "Slapshot_Tracking":    "Slapshot — Tracking",
+    "Slapshot_Rotoscoping":    "Slapshot — Rotoscoping",
+    "Slapshot_Depth_Map":      "Slapshot — Depth Map",
+    "Slapshot_Tracking":       "Slapshot — Tracking",
+    "Slapshot_Smart_Vectors":  "Slapshot — Smart Vectors",
 }

@@ -69,6 +69,27 @@ All camera fields are optional. `sensor_width` and `sensor_height` must be provi
 
 ---
 
+### Slapshot — Smart Vectors
+
+Generates smart vector data from a source video with an optional single reference mask frame.
+
+**Inputs**
+
+| Input | Type | Description |
+|---|---|---|
+| `video` | VIDEO | Source video (`.mp4` or `.mov`) |
+| `api_key` | STRING | Your Slapshot API key |
+| `mask` | IMAGE _(optional)_ | ROI mask — a black background image with the region of interest colored. Must be loaded from a file named with a 5-digit frame number, e.g. `00034.png` |
+| `keyframe` | INT _(optional)_ | Frame number the ROI mask corresponds to (e.g. `34` for `00034.png`). Required when `mask` is connected |
+
+When provided, `mask` and `keyframe` are sent as `roi_mask_path` and `keyframe` in the request metadata. Both must be provided together — supplying one without the other will raise an error.
+
+**Download buttons (enabled after inference)**
+
+- **Download Smart Vectors** — downloads the smart vector results
+
+---
+
 ## How it works
 
 All three nodes follow the same pipeline:
