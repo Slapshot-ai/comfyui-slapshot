@@ -118,8 +118,19 @@ def _get_presigned_upload_url(base_url: str, api_key: str, upload_id: str,
     """Returns (upload_url, s3_key)."""
     url = (f"{base_url}/api/comfyui/assets/upload"
            f"?upload_id={upload_id}&asset_type={asset_type}&file_name={file_name}")
-    resp = requests.get(url, headers={"x-api-key": api_key}, timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
+    try:
+        resp = requests.get(url, headers={"x-api-key": api_key}, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError:
+        code = resp.status_code
+        if code in (401, 403):
+            raise PermissionError(
+                f"[RotoscopingMasks] Invalid or unauthorized API key ({code}). "
+                "Check the api_key widget or your SLAPSHOT_API_KEY environment variable."
+            )
+        raise RuntimeError(
+            f"[RotoscopingMasks] Failed to get upload URL ({code}): {resp.text[:300]}"
+        )
     data = resp.json()
     upload_url = data.get("upload_url")
     s3_key = data.get("s3_key")
@@ -864,16 +875,11 @@ class SlapshotSmartVectorsNode:
             },
             "optional": {
                 "mask": ("IMAGE",),
-                "keyframe": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "frame number (required with ROI Mask)",
-                }),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt": "PROMPT"},
         }
 
-    def run_smart_vectors(self, video, api_key, mask=None, keyframe="", unique_id=None, prompt=None):
+    def run_smart_vectors(self, video, api_key, mask=None, unique_id=None, prompt=None):
         api_key = (api_key or "").strip()
         if not api_key or api_key.lower() == "none":
             api_key = _ENV_API_KEY
@@ -884,30 +890,11 @@ class SlapshotSmartVectorsNode:
             )
 
         has_mask = mask is not None
-        kf_str = (keyframe or "").strip()
-        kf = None
-        if kf_str:
-            try:
-                kf = int(kf_str)
-                if kf < 1:
-                    raise ValueError
-            except ValueError:
-                raise ValueError(
-                    f"[SmartVectors] keyframe must be a positive integer (≥ 1), got: {kf_str!r}"
-                )
-
-        if has_mask and kf is None:
-            raise ValueError(
-                "[SmartVectors] A keyframe number is required when an ROI Mask is connected."
-            )
-        if kf is not None and not has_mask:
-            raise ValueError(
-                "[SmartVectors] An ROI Mask must be connected when a keyframe is specified."
-            )
 
         # ── Validate ROI mask filename before any upload ───────────────────────
-        # Keyframe is 1-indexed; mask filename must be keyframe - 1 (0-indexed).
+        # Keyframe is derived from the mask filename: 00018.png → keyframe 19.
         png_name = None
+        kf = None
         if has_mask:
             png_name = _mask_filename_from_prompt(unique_id, prompt, "mask")
             if png_name is None:
@@ -917,13 +904,8 @@ class SlapshotSmartVectorsNode:
                     "with a 5-digit frame number, e.g. '00018.png'."
                 )
             mask_frame = int(os.path.splitext(png_name)[0])
-            if mask_frame != kf - 1:
-                raise ValueError(
-                    f"[SmartVectors] Mask '{png_name}' is frame {mask_frame} (0-indexed) "
-                    f"but keyframe {kf} expects mask frame {kf - 1} (0-indexed). "
-                    f"Either use mask '{kf - 1:05d}.png' or set keyframe to {mask_frame + 1}."
-                )
-            print(f"[SmartVectors] ROI mask validated: {png_name} (keyframe={kf})")
+            kf = mask_frame + 1
+            print(f"[SmartVectors] ROI mask validated: {png_name} → keyframe={kf}")
 
         def progress(text: str):
             _send_progress(unique_id, text)
@@ -964,7 +946,7 @@ class SlapshotSmartVectorsNode:
                 img = _Image.fromarray(arr, mode="RGB")
 
             fd, local_path = tempfile.mkstemp(suffix=f"_{png_name}", prefix="slapshot_roi_")
-            print(f"[SmartVectors] ROI mask source filename: {png_name}, keyframe in metadata: {kf}")
+            print(f"[SmartVectors] ROI mask: {png_name}, keyframe in metadata: {kf}")
             os.close(fd)
             img.save(local_path)
 

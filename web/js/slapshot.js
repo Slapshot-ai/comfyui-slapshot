@@ -168,8 +168,6 @@ app.registerExtension({
                 if (nodeData.name === "Slapshot_Smart_Vectors") {
                     const roiInput = node.inputs?.find(inp => inp.name === "mask");
                     if (roiInput) roiInput.label = "ROI Mask";
-                    const kf = node.widgets?.find(w => w.name === "keyframe");
-                    if (kf) kf.label = "ROI Mask Keyframe";
                 }
 
                 if (nodeData.name === "Slapshot_Tracking") {
