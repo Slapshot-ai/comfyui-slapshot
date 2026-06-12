@@ -2,6 +2,125 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { ComfyWidgets } from "../../scripts/widgets.js";
 
+// ── API Key modal ─────────────────────────────────────────────────────────────
+
+// null = not yet fetched, true = configured, false = missing
+let _apiKeyStatus = null;
+
+async function _fetchApiKeyStatus() {
+    if (_apiKeyStatus !== null) return _apiKeyStatus;
+    try {
+        const resp = await fetch("/slapshot/api_key_status");
+        if (!resp.ok) return (_apiKeyStatus = true); // fail open
+        const data = await resp.json();
+        _apiKeyStatus = data.configured;
+    } catch {
+        _apiKeyStatus = true; // fail open on network error
+    }
+    return _apiKeyStatus;
+}
+
+async function _checkApiKey() {
+    const ok = await _fetchApiKeyStatus();
+    if (!ok) _showApiKeyModal();
+}
+
+function _showApiKeyModal() {
+    const overlay = document.createElement("div");
+    overlay.style.cssText = [
+        "position:fixed", "inset:0", "background:rgba(0,0,0,0.75)",
+        "z-index:10000", "display:flex", "align-items:center", "justify-content:center",
+    ].join(";");
+
+    const modal = document.createElement("div");
+    modal.style.cssText = [
+        "background:#1e1e2e", "border:1px solid #3a3a5a", "border-radius:12px",
+        "padding:32px", "max-width:460px", "width:90%", "box-sizing:border-box",
+        "font-family:sans-serif",
+    ].join(";");
+
+    const title = document.createElement("h2");
+    title.textContent = "API Key Required to Use Slapshot Nodes";
+    title.style.cssText = "color:#fff;font-size:18px;margin:0 0 14px;font-weight:600;line-height:1.3;";
+
+    const desc = document.createElement("p");
+    desc.innerHTML = [
+        "This workflow contains <strong>Slapshot nodes</strong> that require an API key.",
+        "Set <code style='background:#2a2a3a;padding:1px 5px;border-radius:3px;'>SLAPSHOT_API_KEY</code>",
+        "in your <code style='background:#2a2a3a;padding:1px 5px;border-radius:3px;'>.env</code>",
+        "file or <code style='background:#2a2a3a;padding:1px 5px;border-radius:3px;'>config.ini</code>",
+        "and restart ComfyUI.",
+    ].join(" ");
+    desc.style.cssText = "color:#aaa;font-size:13px;margin:0 0 18px;line-height:1.6;";
+
+    const nodeBox = document.createElement("div");
+    nodeBox.style.cssText = [
+        "background:#2a2a3a", "border:1px solid #3a3a5a", "border-radius:6px",
+        "padding:10px 14px", "margin-bottom:24px",
+    ].join(";");
+    const nodeLabel = document.createElement("div");
+    nodeLabel.textContent = "API Node(s)";
+    nodeLabel.style.cssText = "color:#888;font-size:11px;margin-bottom:6px;";
+    const nodeNames = document.createElement("div");
+    nodeNames.textContent = "Slapshot — Rotoscoping, Depth Map, Tracking, Smart Vectors";
+    nodeNames.style.cssText = "color:#ccc;font-size:13px;";
+    nodeBox.appendChild(nodeLabel);
+    nodeBox.appendChild(nodeNames);
+
+    const buttons = document.createElement("div");
+    buttons.style.cssText = "display:flex;justify-content:flex-end;gap:12px;";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.style.cssText = [
+        "background:transparent", "color:#aaa", "border:1px solid #555",
+        "border-radius:6px", "padding:8px 22px", "cursor:pointer", "font-size:14px",
+    ].join(";");
+    cancelBtn.addEventListener("click", () => overlay.remove());
+
+    const getKeyBtn = document.createElement("button");
+    getKeyBtn.textContent = "Get API Key";
+    getKeyBtn.style.cssText = [
+        "background:#5566ff", "color:#fff", "border:none",
+        "border-radius:6px", "padding:8px 22px", "cursor:pointer", "font-size:14px",
+        "font-weight:600",
+    ].join(";");
+    getKeyBtn.addEventListener("click", () => {
+        window.open("https://app.slapshot.ai/", "_blank", "noopener");
+        overlay.remove();
+    });
+
+    buttons.appendChild(cancelBtn);
+    buttons.appendChild(getKeyBtn);
+
+    modal.appendChild(title);
+    modal.appendChild(desc);
+    modal.appendChild(nodeBox);
+    modal.appendChild(buttons);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.registerExtension({
+    name: "Slapshot.ApiKeyCheck",
+    setup() {
+        const origQueue = app.queuePrompt.bind(app);
+        app.queuePrompt = async function (...args) {
+            const hasSlapshot = app.graph._nodes?.some(n => PREVIEW_NODES.includes(n.type));
+            if (hasSlapshot) {
+                const ok = await _fetchApiKeyStatus();
+                if (!ok) {
+                    _showApiKeyModal();
+                    return;
+                }
+            }
+            return origQueue(...args);
+        };
+    },
+});
+
 const PREVIEW_NODES = [
     "Slapshot_Rotoscoping",
     "Slapshot_Rotoscoping_Download",
@@ -69,6 +188,8 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             onNodeCreated?.apply(this, arguments);
 
+            _checkApiKey();
+
             const node = this;
 
             // Set video input label synchronously before first render.
@@ -108,49 +229,6 @@ app.registerExtension({
             });
 
             requestAnimationFrame(() => {
-                // Relabel the api_key widget
-                const apiKeyWidget = node.widgets?.find(w => w.name === "api_key");
-                if (apiKeyWidget) {
-                    apiKeyWidget.label = "API key";
-                    apiKeyWidget.serialize = true;
-
-                    const STORAGE_KEY = "slapshot_api_key";
-                    const stored = localStorage.getItem(STORAGE_KEY);
-                    if (stored && !apiKeyWidget.value) apiKeyWidget.value = stored;
-
-                    const origCallback = apiKeyWidget.callback;
-                    apiKeyWidget.callback = function (v) {
-                        if (v) localStorage.setItem(STORAGE_KEY, v);
-                        else localStorage.removeItem(STORAGE_KEY);
-                        origCallback?.call(this, v);
-                    };
-                }
-
-                // "Get API key" — native anchor tag so browser handles cursor + click
-                const el = document.createElement("div");
-                el.style.cssText = "height:14px;display:flex;align-items:center;padding:0 6px;box-sizing:border-box;";
-                const a = document.createElement("a");
-                a.textContent = "Don't have an API key? Get it here";
-                a.href = "https://slapshot.ai/";
-                a.target = "_blank";
-                a.rel = "noopener";
-                a.style.cssText = "color:#99aaff;font-size:11px;text-decoration:underline;cursor:pointer;line-height:1;";
-                a.addEventListener("click", e => e.stopPropagation());
-                el.appendChild(a);
-
-                const linkWidget = node.addDOMWidget("api_key_link", "customLink", el, {
-                    serialize: false,
-                    getHeight: () => 14,
-                });
-
-                // Place link widget right after api_key
-                const apiKeyIdx = node.widgets.findIndex(w => w.name === "api_key");
-                const linkIdx   = node.widgets.indexOf(linkWidget);
-                if (apiKeyIdx >= 0 && linkIdx >= 0 && linkIdx !== apiKeyIdx + 1) {
-                    node.widgets.splice(linkIdx, 1);
-                    node.widgets.splice(apiKeyIdx + 1, 0, linkWidget);
-                }
-
                 // Title-case any mask inputs that exist at load time.
                 node.inputs?.forEach(inp => {
                     if (/^mask_\d+$/.test(inp.name))
@@ -263,8 +341,6 @@ async function _slapshotDownload(node, exportType) {
         return;
     }
 
-    const apiKey = node.widgets?.find(w => w.name === "api_key")?.value ?? "";
-
     const externalUrl = `${node._slapshotBaseUrl}/api/comfyui/${node._slapshotJobId}/result?export_type=${exportType}`;
     console.log(`[Slapshot] download_result → GET ${externalUrl} (proxied via ComfyUI)`);
 
@@ -275,7 +351,6 @@ async function _slapshotDownload(node, exportType) {
             body: JSON.stringify({
                 job_id:      node._slapshotJobId,
                 export_type: exportType,
-                api_key:     apiKey,
                 base_url:    node._slapshotBaseUrl,
             }),
         });
@@ -350,7 +425,7 @@ app.registerExtension({
             removeBtn.disabled = true;
             removeBtn.serialize = false;
 
-            // Move add/remove buttons to sit above the api_key widget.
+            // Move add/remove buttons to the top (before preview_text).
             // All extensions have run by the next frame so indices are stable.
             requestAnimationFrame(() => {
                 const btns = [addBtn, removeBtn];
@@ -358,8 +433,8 @@ app.registerExtension({
                     const idx = node.widgets.indexOf(btn);
                     if (idx >= 0) node.widgets.splice(idx, 1);
                 });
-                const apiKeyIdx = node.widgets.findIndex(w => w.name === "api_key");
-                node.widgets.splice(apiKeyIdx >= 0 ? apiKeyIdx : 0, 0, ...btns);
+                const previewIdx = node.widgets.findIndex(w => w.name === "preview_text");
+                node.widgets.splice(previewIdx >= 0 ? previewIdx : 0, 0, ...btns);
 
                 _updateMaskBtns(node, addBtn, removeBtn);
             });
