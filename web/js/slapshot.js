@@ -106,6 +106,7 @@ function _showApiKeyModal() {
 app.registerExtension({
     name: "Slapshot.ApiKeyCheck",
     setup() {
+        // Block queue and show modal when API key is missing
         const origQueue = app.queuePrompt.bind(app);
         app.queuePrompt = async function (...args) {
             const hasSlapshot = app.graph._nodes?.some(n => PREVIEW_NODES.includes(n.type));
@@ -118,6 +119,24 @@ app.registerExtension({
             }
             return origQueue(...args);
         };
+
+        // Fix cursor: LiteGraph resets canvas.style.cursor (inline) on every mousemove,
+        // overwriting any pointer we set. A CSS class with !important beats inline styles.
+        const cursorStyle = document.createElement("style");
+        cursorStyle.textContent = ".slapshot-pointer { cursor: pointer !important; }";
+        document.head.appendChild(cursorStyle);
+
+        const titleH = (typeof LiteGraph !== "undefined" ? LiteGraph.NODE_TITLE_HEIGHT : null) ?? 30;
+        document.addEventListener("mousemove", () => {
+            const c = app.canvas;
+            const node = c?.node_over;
+            const domCanvas = c?.canvas;
+            if (!domCanvas) return;
+            const want = node &&
+                PREVIEW_NODES.includes(node.type) &&
+                (c.graph_mouse ?? c.last_mouse_position)?.[1] > node.pos[1] + titleH;
+            domCanvas.classList.toggle("slapshot-pointer", !!want);
+        });
     },
 });
 
