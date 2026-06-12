@@ -188,8 +188,6 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             onNodeCreated?.apply(this, arguments);
 
-            _checkApiKey();
-
             const node = this;
 
             // Set video input label synchronously before first render.
