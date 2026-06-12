@@ -60,7 +60,7 @@ _ENV_API_KEY = os.environ.get("SLAPSHOT_API_KEY", "").strip() or _load_config_in
 
 POLL_INTERVAL_SECONDS = 60
 REQUEST_TIMEOUT = 30
-MAX_POLL_SECONDS = 5 * 60 * 60  # 5 hours
+MAX_POLL_SECONDS = 10 * 60 * 60  # 10 hours
 
 _MASK_FILENAME_RE = re.compile(r"^\d{5}\.png$")
 
@@ -466,7 +466,7 @@ def _submit_and_poll(api_key: str, video_key: str, service_payload: dict,
 
             if time.monotonic() - poll_start > MAX_POLL_SECONDS:
                 result_box["error"] = RuntimeError(
-                    f"[{log_prefix}] Job {job_id} did not complete within 5 hours "
+                    f"[{log_prefix}] Job {job_id} did not complete within 10 hours "
                     f"({poll_num} polls). Giving up."
                 )
                 done_event.set()
