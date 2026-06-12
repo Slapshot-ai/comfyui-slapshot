@@ -7,7 +7,44 @@ const PREVIEW_NODES = [
     "Slapshot_Rotoscoping_Download",
     "Slapshot_Rotoscoping_Masks",
     "Slapshot_Dynamic_Masks_Test",
+    "Slapshot_Depth_Map",
+    "Slapshot_Tracking",
+    "Slapshot_Smart_Vectors",
 ];
+
+const NODE_DOWNLOADS = {
+    "Slapshot_Rotoscoping":         [
+        { label: "Download Hard Mattes", exportType: "hard_mattes" },
+        { label: "Download MB Mattes",   exportType: "mb_mattes" },
+    ],
+    "Slapshot_Rotoscoping_Download": [
+        { label: "Download Hard Mattes", exportType: "hard_mattes" },
+        { label: "Download MB Mattes",   exportType: "mb_mattes" },
+    ],
+    "Slapshot_Rotoscoping_Masks":    [
+        { label: "Download Hard Mattes", exportType: "hard_mattes" },
+        { label: "Download MB Mattes",   exportType: "mb_mattes" },
+    ],
+    "Slapshot_Dynamic_Masks_Test":   [
+        { label: "Download Hard Mattes", exportType: "hard_mattes" },
+        { label: "Download MB Mattes",   exportType: "mb_mattes" },
+    ],
+    "Slapshot_Depth_Map":           [
+        {
+            label: "Download Depth Map",
+            exportType: (node) => {
+                const val = node.widgets?.find(w => w.name === "export_type")?.value ?? "MOV";
+                return val === "JPG" ? "jpg" : "mov";
+            },
+        },
+    ],
+    "Slapshot_Tracking":             [
+        { label: "Download Tracking Data", exportType: "tracking" },
+    ],
+    "Slapshot_Smart_Vectors":        [
+        { label: "Download Smart Vectors", exportType: "exr" },
+    ],
+};
 
 // ── Real-time progress updates from Python ────────────────────────────────────
 
@@ -55,23 +92,20 @@ app.registerExtension({
             widget.serialize = false;
 
             // ── Download buttons (disabled until inference completes) ──────────
-            const hardMatteBtn = node.addWidget(
-                "button", "Download Hard Mattes", null,
-                async () => { await _slapshotDownload(node, "hard_mattes"); }
-            );
-            hardMatteBtn.disabled = true;
-            hardMatteBtn.tooltip = "Hard Mattes can only be downloaded after inference completion";
-            hardMatteBtn.serialize = false;
-            node._hardMatteBtn = hardMatteBtn;
-
-            const mbMatteBtn = node.addWidget(
-                "button", "Download MB Mattes", null,
-                async () => { await _slapshotDownload(node, "mb_mattes"); }
-            );
-            mbMatteBtn.disabled = true;
-            mbMatteBtn.tooltip = "MB Mattes can only be downloaded after inference completion";
-            mbMatteBtn.serialize = false;
-            node._mbMatteBtn = mbMatteBtn;
+            node._downloadBtns = (NODE_DOWNLOADS[nodeData.name] ?? []).map(({ label, exportType }) => {
+                const btn = node.addWidget(
+                    "button", label, null,
+                    async () => {
+                        const et = typeof exportType === "function" ? exportType(node) : exportType;
+                        await _slapshotDownload(node, et);
+                    }
+                );
+                btn.disabled = true;
+                btn.tooltip = `${label} can only be downloaded after inference completion`;
+                btn.serialize = false;
+                btn._enabledLabel = "⬇  " + label;
+                return btn;
+            });
 
             requestAnimationFrame(() => {
                 // Relabel the api_key widget
@@ -123,6 +157,63 @@ app.registerExtension({
                         inp.label = "Mask_" + inp.name.slice(5);
                 });
 
+                const exportTypeWidget = node.widgets?.find(w => w.name === "export_type");
+                if (exportTypeWidget) {
+                    exportTypeWidget.label = "Export Type";
+                    if (!["JPG", "MOV"].includes(exportTypeWidget.value)) {
+                        exportTypeWidget.value = "JPG";
+                    }
+                }
+
+                if (nodeData.name === "Slapshot_Smart_Vectors") {
+                    const roiInput = node.inputs?.find(inp => inp.name === "mask");
+                    if (roiInput) roiInput.label = "ROI Mask";
+                }
+
+                if (nodeData.name === "Slapshot_Tracking") {
+                    const TRACKING_LABELS = {
+                        "working_fps":              "Working FPS",
+                        "lens":                     "Lens (mm)",
+                        "fix_focal_length":         "Fix Focal Length  [False=Floating, True=Fixed]",
+                        "sensor_width":             "Sensor Width (mm)",
+                        "sensor_height":            "Sensor Height (mm)",
+                        "fix_sensor_size":          "Fix Sensor Size  [True=Fixed, False=Floating]",
+                        "estimated_closest_point":  "Estimated Closest Point (m)",
+                        "estimated_farthest_point": "Estimated Farthest Point (m)",
+                        "calculate_distortion":     "Calculate Distortion",
+                    };
+                    node.widgets?.forEach(w => {
+                        if (TRACKING_LABELS[w.name]) w.label = TRACKING_LABELS[w.name];
+                    });
+
+                    // Numeric string fields should never hold "True"/"False" —
+                    // reset them if a positional workflow-restore corrupted them.
+                    const NUMERIC_FIELDS = new Set([
+                        "working_fps", "lens", "sensor_width", "sensor_height",
+                        "estimated_closest_point", "estimated_farthest_point",
+                    ]);
+                    const COMBO_DEFAULTS = {
+                        "fix_focal_length":     "False",
+                        "fix_sensor_size":      "True",
+                        "calculate_distortion": "False",
+                    };
+                    const COMBO_OPTIONS = {
+                        "fix_focal_length":     ["False", "True"],
+                        "fix_sensor_size":      ["True", "False"],
+                        "calculate_distortion": ["False", "True"],
+                    };
+                    node.widgets?.forEach(w => {
+                        if (NUMERIC_FIELDS.has(w.name)) {
+                            const v = (w.value || "").trim();
+                            if (v !== "" && isNaN(Number(v))) w.value = "";
+                        } else if (COMBO_DEFAULTS[w.name] !== undefined) {
+                            if (!COMBO_OPTIONS[w.name].includes(w.value)) {
+                                w.value = COMBO_DEFAULTS[w.name];
+                            }
+                        }
+                    });
+                }
+
                 _setNodeSize(node);
             });
         };
@@ -150,15 +241,10 @@ app.registerExtension({
                 this._slapshotReady    = true;
                 this._inferenceRunning = false;
 
-                if (this._hardMatteBtn) {
-                    this._hardMatteBtn.name     = "⬇  Download Hard Mattes";
-                    this._hardMatteBtn.disabled = false;
-                    this._hardMatteBtn.tooltip  = undefined;
-                }
-                if (this._mbMatteBtn) {
-                    this._mbMatteBtn.name     = "⬇  Download MB Mattes";
-                    this._mbMatteBtn.disabled = false;
-                    this._mbMatteBtn.tooltip  = undefined;
+                for (const btn of (this._downloadBtns ?? [])) {
+                    btn.name     = btn._enabledLabel;
+                    btn.disabled = false;
+                    btn.tooltip  = undefined;
                 }
                 app.graph.setDirtyCanvas(true);
             }
