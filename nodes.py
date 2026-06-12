@@ -14,6 +14,7 @@ import time
 import json
 import threading
 import tempfile
+import configparser
 import torch
 import requests
 import folder_paths
@@ -38,15 +39,28 @@ def _load_dotenv():
     except Exception as exc:
         print(f"[RotoscopingMasks] Could not load .env: {exc}")
 
+def _load_config_ini() -> str:
+    """Load SLAPSHOT_API_KEY from config.ini in the plugin directory."""
+    try:
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
+        if not os.path.isfile(config_path):
+            return ""
+        config = configparser.ConfigParser()
+        config.read(config_path)
+        return config.get("API", "SLAPSHOT_API_KEY", fallback="").strip()
+    except Exception as exc:
+        print(f"[RotoscopingMasks] Could not load config.ini: {exc}")
+        return ""
+
 _load_dotenv()
 
 # BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.ai").rstrip("/")
 BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.work").rstrip("/")
-_ENV_API_KEY = os.environ.get("SLAPSHOT_API_KEY", "").strip()
+_ENV_API_KEY = os.environ.get("SLAPSHOT_API_KEY", "").strip() or _load_config_ini()
 
 POLL_INTERVAL_SECONDS = 60
 REQUEST_TIMEOUT = 30
-MAX_POLL_SECONDS = 5 * 60 * 60  # 5 hours
+MAX_POLL_SECONDS = 10 * 60 * 60  # 10 hours
 
 _MASK_FILENAME_RE = re.compile(r"^\d{5}\.png$")
 
@@ -90,6 +104,10 @@ try:
         except Exception as exc:
             return _web.json_response({"error": str(exc)}, status=500)
 
+    @_PS.instance.routes.get("/slapshot/api_key_status")
+    async def _slapshot_api_key_status(request):
+        return _web.json_response({"configured": bool(_ENV_API_KEY)})
+
 except Exception:
     pass
 
@@ -126,7 +144,7 @@ def _get_presigned_upload_url(base_url: str, api_key: str, upload_id: str,
         if code in (401, 403):
             raise PermissionError(
                 f"[RotoscopingMasks] Invalid or unauthorized API key ({code}). "
-                "Check the api_key widget or your SLAPSHOT_API_KEY environment variable."
+                "Check your SLAPSHOT_API_KEY in .env or config.ini."
             )
         raise RuntimeError(
             f"[RotoscopingMasks] Failed to get upload URL ({code}): {resp.text[:300]}"
@@ -448,7 +466,7 @@ def _submit_and_poll(api_key: str, video_key: str, service_payload: dict,
 
             if time.monotonic() - poll_start > MAX_POLL_SECONDS:
                 result_box["error"] = RuntimeError(
-                    f"[{log_prefix}] Job {job_id} did not complete within 5 hours "
+                    f"[{log_prefix}] Job {job_id} did not complete within 10 hours "
                     f"({poll_num} polls). Giving up."
                 )
                 done_event.set()
@@ -540,25 +558,17 @@ class SlapshotRotoscopingNode:
         return {
             "required": {
                 "video": ("VIDEO",),
-                "api_key": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "your-api-key (or set SLAPSHOT_API_KEY env var)",
-                    # "password": True,
-                }),
             },
             "optional": optional,
             "hidden": {"unique_id": "UNIQUE_ID", "prompt": "PROMPT"},
         }
 
-    def run_rotoscoping_with_masks(self, video, api_key, unique_id=None, prompt=None, **kwargs):
-        api_key = (api_key or "").strip()
-        if not api_key or api_key.lower() == "none":
-            api_key = _ENV_API_KEY
+    def run_rotoscoping_with_masks(self, video, unique_id=None, prompt=None, **kwargs):
+        api_key = _ENV_API_KEY
         if not api_key:
-            raise ValueError(
-                "[RotoscopingMasks] API Key is required. "
-                "Enter it in the node widget or set the SLAPSHOT_API_KEY environment variable."
+            raise PermissionError(
+                "[RotoscopingMasks] No API key configured. "
+                "Set SLAPSHOT_API_KEY in your .env file or config.ini and restart ComfyUI."
             )
 
         def progress(text: str):
@@ -671,23 +681,16 @@ class SlapshotDepthMapNode:
             "required": {
                 "video": ("VIDEO",),
                 "export_type": (["JPG", "MOV"],),
-                "api_key": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "your-api-key (or set SLAPSHOT_API_KEY env var)",
-                }),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    def run_depth_map(self, video, export_type="JPG", api_key="", unique_id=None):
-        api_key = (api_key or "").strip()
-        if not api_key or api_key.lower() == "none":
-            api_key = _ENV_API_KEY
+    def run_depth_map(self, video, export_type="JPG", unique_id=None):
+        api_key = _ENV_API_KEY
         if not api_key:
-            raise ValueError(
-                "[DepthMap] API Key is required. "
-                "Enter it in the node widget or set the SLAPSHOT_API_KEY environment variable."
+            raise PermissionError(
+                "[DepthMap] No API key configured. "
+                "Set SLAPSHOT_API_KEY in your .env file or config.ini and restart ComfyUI."
             )
 
         def progress(text: str):
@@ -742,11 +745,6 @@ class SlapshotTrackingNode:
         return {
             "required": {
                 "video": ("VIDEO",),
-                "api_key": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "your-api-key (or set SLAPSHOT_API_KEY env var)",
-                }),
             },
             "optional": {
                 "working_fps":              ("STRING", {"default": "", "multiline": False, "placeholder": "e.g. 23.98"}),
@@ -762,20 +760,18 @@ class SlapshotTrackingNode:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    def run_tracking(self, video, api_key,
+    def run_tracking(self, video,
                      working_fps="",
                      lens="", fix_focal_length="False",
                      sensor_width="", sensor_height="", fix_sensor_size="True",
                      estimated_closest_point="", estimated_farthest_point="",
                      calculate_distortion="False",
                      unique_id=None):
-        api_key = (api_key or "").strip()
-        if not api_key or api_key.lower() == "none":
-            api_key = _ENV_API_KEY
+        api_key = _ENV_API_KEY
         if not api_key:
-            raise ValueError(
-                "[Tracking] API Key is required. "
-                "Enter it in the node widget or set the SLAPSHOT_API_KEY environment variable."
+            raise PermissionError(
+                "[Tracking] No API key configured. "
+                "Set SLAPSHOT_API_KEY in your .env file or config.ini and restart ComfyUI."
             )
 
         def _parse_float(val, name):
@@ -867,11 +863,6 @@ class SlapshotSmartVectorsNode:
         return {
             "required": {
                 "video": ("VIDEO",),
-                "api_key": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "your-api-key (or set SLAPSHOT_API_KEY env var)",
-                }),
             },
             "optional": {
                 "mask": ("IMAGE",),
@@ -879,14 +870,12 @@ class SlapshotSmartVectorsNode:
             "hidden": {"unique_id": "UNIQUE_ID", "prompt": "PROMPT"},
         }
 
-    def run_smart_vectors(self, video, api_key, mask=None, unique_id=None, prompt=None):
-        api_key = (api_key or "").strip()
-        if not api_key or api_key.lower() == "none":
-            api_key = _ENV_API_KEY
+    def run_smart_vectors(self, video, mask=None, unique_id=None, prompt=None):
+        api_key = _ENV_API_KEY
         if not api_key:
-            raise ValueError(
-                "[SmartVectors] API Key is required. "
-                "Enter it in the node widget or set the SLAPSHOT_API_KEY environment variable."
+            raise PermissionError(
+                "[SmartVectors] No API key configured. "
+                "Set SLAPSHOT_API_KEY in your .env file or config.ini and restart ComfyUI."
             )
 
         has_mask = mask is not None
