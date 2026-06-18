@@ -144,6 +144,12 @@ git clone https://github.com/slapshot-ai/comfyui-slapshot
 
 Restart ComfyUI.
 
+## Direct API Integration
+
+In addition to using the ComfyUI nodes, you can call the Slapshot API directly from any language or tool. Full API reference and example requests are available in the [Slapshot API Documentation](https://documenter.getpostman.com/view/49089023/2sB3WsNKMa).
+
+Generate your API key from the **Developer** tab in your [Slapshot profile](https://app.slapshot.ai/) and pass it as the `x-api-key` header in every request.
+
 ## Requirements
 
 - Python package: `requests` (installed automatically via `requirements.txt`)
