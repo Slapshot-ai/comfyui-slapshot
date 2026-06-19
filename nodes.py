@@ -312,6 +312,24 @@ def _get_video_frame_count(video_path: str) -> int | None:
             return count
     except Exception:
         pass
+    try:
+        import subprocess
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-count_packets",
+                "-show_entries", "stream=nb_read_packets",
+                "-of", "csv=p=0",
+                video_path,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        count = int(result.stdout.strip())
+        if count > 0:
+            return count
+    except Exception:
+        pass
     return None
 
 
@@ -400,6 +418,46 @@ def _headers(api_key: str) -> dict:
         "x-api-key": api_key.strip(),
         "Content-Type": "application/json",
     }
+
+
+def _check_user_limit(api_key: str, video_frame_count: int | None, log_prefix: str) -> None:
+    """Raises ValueError if the user's free-tier frame limit is exceeded."""
+    limit_url = f"{BASE_URL}/api/user/limit"
+    try:
+        resp = requests.get(limit_url, headers=_headers(api_key), timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError:
+        code = resp.status_code
+        if code in (401, 403):
+            raise PermissionError(
+                f"[{log_prefix}] Invalid or unauthorized API key ({code}). "
+                "Check your SLAPSHOT_API_KEY in .env or config.ini."
+            )
+        print(f"[{log_prefix}] Could not check user limit ({code}): {resp.text[:200]} — skipping check.")
+        return
+    except Exception as exc:
+        print(f"[{log_prefix}] Could not check user limit: {exc} — skipping check.")
+        return
+
+    data = resp.json()
+    is_above_limit = data.get("is_above_limit", False)
+    subscription_tier = data.get("subscription_tier", "")
+    frames_inferenced = data.get("frames_inferenced") or 0
+
+    FREE_TIER_LIMIT = 1000
+
+    if is_above_limit:
+        raise ValueError(
+            "Free tier limit of 1000 frames has been reached. Please upgrade to keep using APIs."
+        )
+
+    if subscription_tier == "free_tier" and not is_above_limit:
+        incoming = video_frame_count or 0
+        if frames_inferenced + incoming >= FREE_TIER_LIMIT:
+            raise ValueError(
+                f"Failed to run workflow. Running this workflow will breach the free tier limit of 1000 frames, "
+                f"already inferenced {frames_inferenced} frames. Please upgrade to keep using APIs."
+            )
 
 
 # ── Shared submit + poll ──────────────────────────────────────────────────────
@@ -605,20 +663,25 @@ class SlapshotRotoscopingNode:
         try:
             video_frame_count = _get_video_frame_count(video_local)
             print(f"[RotoscopingMasks] Video frame count: {video_frame_count}")
-            if video_frame_count is not None:
-                if video_frame_count > 3500:
+            if not video_frame_count:
+                raise ValueError(
+                    f"[RotoscopingMasks] Input video has no frames, Check input video."
+                )
+            if video_frame_count > 3500:
+                raise ValueError(
+                    f"[RotoscopingMasks] Input video should not exceed 3500 frames "
+                    f"(got {video_frame_count})."
+                )
+            for _, frame_number, png_name in mask_inputs:
+                if frame_number >= video_frame_count:
                     raise ValueError(
-                        f"[RotoscopingMasks] Input video should not exceed 3500 frames "
-                        f"(got {video_frame_count})."
+                        f"[RotoscopingMasks] Mask '{png_name}' targets frame "
+                        f"{frame_number + 1} but the video only has "
+                        f"{video_frame_count} frame(s). "
+                        f"Valid range: 00000–{video_frame_count - 1:05d}.png."
                     )
-                for _, frame_number, png_name in mask_inputs:
-                    if frame_number >= video_frame_count:
-                        raise ValueError(
-                            f"[RotoscopingMasks] Mask '{png_name}' targets frame "
-                            f"{frame_number + 1} but the video only has "
-                            f"{video_frame_count} frame(s). "
-                            f"Valid range: 00000–{video_frame_count - 1:05d}.png."
-                        )
+
+            _check_user_limit(api_key, video_frame_count, "RotoscopingMasks")
 
             progress(f"Uploading video: {video_filename}...")
             upload_url, video_key = _get_presigned_upload_url(BASE_URL, api_key, upload_id, "video", video_filename)
@@ -701,6 +764,19 @@ class SlapshotDepthMapNode:
 
         video_local, video_filename = _save_video_locally(video)
         try:
+            video_frame_count = _get_video_frame_count(video_local)
+            print(f"[DepthMap] Video frame count: {video_frame_count}")
+            if not video_frame_count:
+                raise ValueError(
+                    f"[RotoscopingMasks] Input video has no frames, Check input video."
+                )
+            if video_frame_count > 3500:
+                raise ValueError(
+                    f"[DepthMap] Input video should not exceed 3500 frames "
+                    f"(got {video_frame_count})."
+                )
+            _check_user_limit(api_key, video_frame_count, "DepthMap")
+
             progress(f"Uploading video: {video_filename}...")
             upload_url, video_key = _get_presigned_upload_url(
                 BASE_URL, api_key, upload_id, "video", video_filename
@@ -821,6 +897,19 @@ class SlapshotTrackingNode:
 
         video_local, video_filename = _save_video_locally(video)
         try:
+            video_frame_count = _get_video_frame_count(video_local)
+            print(f"[Tracking] Video frame count: {video_frame_count}")
+            if not video_frame_count:
+                raise ValueError(
+                    f"[RotoscopingMasks] Input video has no frames, Check input video."
+                )
+            if video_frame_count > 3500:
+                raise ValueError(
+                    f"[Tracking] Input video should not exceed 3500 frames "
+                    f"(got {video_frame_count})."
+                )
+            _check_user_limit(api_key, video_frame_count, "Tracking")
+
             progress(f"Uploading video: {video_filename}...")
             upload_url, video_key = _get_presigned_upload_url(
                 BASE_URL, api_key, upload_id, "video", video_filename
@@ -906,6 +995,26 @@ class SlapshotSmartVectorsNode:
         video_local, video_filename = _save_video_locally(video)
         video_key = None
         try:
+            video_frame_count = _get_video_frame_count(video_local)
+            print(f"[SmartVectors] Video frame count: {video_frame_count}")
+            if not video_frame_count:
+                raise ValueError(
+                    f"[RotoscopingMasks] Input video has no frames, Check input video."
+                )
+            if video_frame_count > 3500:
+                raise ValueError(
+                    f"[SmartVectors] Input video should not exceed 3500 frames "
+                    f"(got {video_frame_count})."
+                )
+            if has_mask and kf >= video_frame_count:
+                raise ValueError(
+                    f"[SmartVectors] Mask '{png_name}' targets frame "
+                    f"{kf} but the video only has "
+                    f"{video_frame_count} frame(s). "
+                    f"Valid range: 00000–{video_frame_count - 1:05d}.png."
+                )
+            _check_user_limit(api_key, video_frame_count, "SmartVectors")
+
             progress(f"Uploading video: {video_filename}...")
             upload_url, video_key = _get_presigned_upload_url(
                 BASE_URL, api_key, upload_id, "video", video_filename
