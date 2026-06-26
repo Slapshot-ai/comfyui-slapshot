@@ -231,7 +231,7 @@ def _save_mask_to_tempfile(frame, frame_idx: int) -> tuple:
 
 # ── Video helpers ─────────────────────────────────────────────────────────────
 
-_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+_VIDEO_EXTS = {".mp4", ".mov"}
 
 
 def _extract_video_filename(video) -> str | None:
@@ -339,18 +339,31 @@ def _save_video_locally(video) -> tuple:
     print(f"[RotoscopingMasks] Detected video filename: {raw!r} "
           f"(object type: {type(video).__name__})")
 
-    filename = raw if raw else "video.mp4"
-    if not filename.lower().endswith((".mp4", ".mov")):
-        filename = os.path.splitext(filename)[0] + ".mp4"
-
     # Prefer a direct copy of the original file — preserves codec/container and
     # avoids ProRes-in-mp4 transcoding errors that save_to() can trigger.
     source_file = _find_video_source_file(video, raw)
     print(f"[RotoscopingMasks] Resolved source file: {source_file!r}")
 
+    source_ext = os.path.splitext(source_file)[1].lower() if source_file else ""
+    raw_ext = os.path.splitext(raw)[1].lower() if raw else ""
+
+    if raw_ext and raw_ext not in _VIDEO_EXTS:
+        raise ValueError(
+            f"[RotoscopingMasks] Unsupported video extension '{raw_ext}'. "
+            "Only .mp4 and .mov are allowed."
+        )
+
+    if source_ext and source_ext not in _VIDEO_EXTS:
+        raise ValueError(
+            f"[RotoscopingMasks] Unsupported video extension '{source_ext}'. "
+            "Only .mp4 and .mov are allowed."
+        )
+
+    filename = raw if raw else f"video{source_ext or '.mp4'}"
+
     if source_file:
         import shutil
-        ext = os.path.splitext(filename)[1]
+        ext = os.path.splitext(filename)[1].lower()
         fd, path = tempfile.mkstemp(suffix=ext, prefix="slapshot_video_")
         os.close(fd)
         shutil.copy2(source_file, path)
