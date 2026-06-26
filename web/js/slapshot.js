@@ -150,6 +150,8 @@ const PREVIEW_NODES = [
     "Slapshot_Smart_Vectors",
 ];
 
+const DEFAULT_SLAPSHOT_BASE_URL = "https://autopilot.slapshot.work";
+
 const NODE_DOWNLOADS = {
     "Slapshot_Rotoscoping":         [
         { label: "Download Hard Mattes", exportType: "hard_mattes" },
@@ -229,6 +231,15 @@ app.registerExtension({
             widget.computeSize = (width) => [width, 260];
             widget.serialize = false;
 
+            // ── Invisible gap between console bottom edge and download button ──
+            // LiteGraph button widgets render a visible bar; override draw to get
+            // clean empty space so the disabled download button doesn't overlap.
+            const postConsoleSpacer = node.addWidget("button", " ", null, () => {});
+            postConsoleSpacer.disabled = true;
+            postConsoleSpacer.serialize = false;
+            postConsoleSpacer.computeSize = (width) => [width, 14];
+            postConsoleSpacer.draw = () => {};
+
             // ── Download buttons (disabled until inference completes) ──────────
             node._downloadBtns = (NODE_DOWNLOADS[nodeData.name] ?? []).map(({ label, exportType }) => {
                 const btn = node.addWidget(
@@ -241,9 +252,60 @@ app.registerExtension({
                 btn.disabled = true;
                 btn.tooltip = `${label} can only be downloaded after inference completion`;
                 btn.serialize = false;
+                btn._disabledLabel = label;
                 btn._enabledLabel = "⬇  " + label;
                 return btn;
             });
+
+            // ── Manual lookup/download by job_id ──────────────────────────────
+            const preJobIdSpacer = node.addWidget("button", " ", null, () => {});
+            preJobIdSpacer.disabled = true;
+            preJobIdSpacer.serialize = false;
+            preJobIdSpacer.computeSize = (width) => [width, 18];
+            preJobIdSpacer.draw = () => {};
+
+            const jobIdWidget = node.addWidget(
+                "text",
+                "job_id",
+                "",
+                (value) => { node._manualJobId = String(value ?? "").trim(); },
+                { placeholder: "Paste job ID here" }
+            );
+            jobIdWidget.serialize = false;
+            if (jobIdWidget.inputEl) {
+                jobIdWidget.inputEl.style.padding = "10px 12px";
+            }
+
+            const downloadJobBtn = node.addWidget("button", "Download Previous Job Result", null, async () => {
+                const rawJobId = String(jobIdWidget.value ?? node._manualJobId ?? "").trim();
+                if (!rawJobId) {
+                    alert("Please enter a job ID first.");
+                    return;
+                }
+                const exportType = _resolvePrimaryExportType(node);
+                if (!exportType) {
+                    alert("No export_type could be resolved for this node.");
+                    return;
+                }
+                const data = await _slapshotRequestDownload(rawJobId, exportType, node._slapshotBaseUrl);
+                if (!data) return;
+
+                node._slapshotJobId = rawJobId;
+                node._slapshotReady = true;
+                node._inferenceRunning = false;
+                _setDownloadButtonsEnabled(node, true);
+
+                const downloadUrl = data.download_url || data.url || data.presigned_url;
+                if (downloadUrl) _openDownload(downloadUrl);
+
+                const consoleWidget = node.widgets?.find(w => w.name === "preview_text");
+                if (consoleWidget) {
+                    consoleWidget.value = `Job ${rawJobId} ready — download buttons enabled above.`;
+                }
+                app.graph.setDirtyCanvas(true);
+            });
+            downloadJobBtn.serialize = false;
+            downloadJobBtn.computeSize = (width) => [width, 36];
 
             requestAnimationFrame(() => {
                 // Title-case any mask inputs that exist at load time.
@@ -335,12 +397,7 @@ app.registerExtension({
                 this._slapshotBaseUrl  = baseUrl;
                 this._slapshotReady    = true;
                 this._inferenceRunning = false;
-
-                for (const btn of (this._downloadBtns ?? [])) {
-                    btn.name     = btn._enabledLabel;
-                    btn.disabled = false;
-                    btn.tooltip  = undefined;
-                }
+                _setDownloadButtonsEnabled(this, true);
                 app.graph.setDirtyCanvas(true);
             }
         };
@@ -358,7 +415,37 @@ async function _slapshotDownload(node, exportType) {
         return;
     }
 
-    const externalUrl = `${node._slapshotBaseUrl}/api/comfyui/${node._slapshotJobId}/result?export_type=${exportType}`;
+    const data = await _slapshotRequestDownload(node._slapshotJobId, exportType, node._slapshotBaseUrl);
+    if (!data) return;
+
+    const downloadUrl = data.download_url || data.url || data.presigned_url;
+    if (!downloadUrl) {
+        console.warn(`[Slapshot] no download URL in response keys:`, Object.keys(data));
+        alert("Slapshot: no download URL in response.");
+        return;
+    }
+
+    _openDownload(downloadUrl);
+}
+
+async function _slapshotRequestDownload(jobId, exportType, baseUrl) {
+    const normalizedJobId = String(jobId ?? "").trim();
+    const normalizedExportType = String(exportType ?? "").trim();
+    const normalizedBaseUrl = String(baseUrl ?? "").trim() || DEFAULT_SLAPSHOT_BASE_URL;
+
+    if (!normalizedJobId || !normalizedExportType) {
+        alert("Slapshot: missing job_id or export_type.");
+        return null;
+    }
+
+    const hasApiKey = await _fetchApiKeyStatus();
+    if (!hasApiKey) {
+        _showApiKeyModal();
+        alert("Slapshot: API key is missing. Configure SLAPSHOT_API_KEY first.");
+        return null;
+    }
+
+    const externalUrl = `${normalizedBaseUrl}/api/comfyui/${normalizedJobId}/result?export_type=${normalizedExportType}`;
     console.log(`[Slapshot] download_result → GET ${externalUrl} (proxied via ComfyUI)`);
 
     try {
@@ -366,37 +453,66 @@ async function _slapshotDownload(node, exportType) {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                job_id:      node._slapshotJobId,
-                export_type: exportType,
-                base_url:    node._slapshotBaseUrl,
+                job_id:      normalizedJobId,
+                export_type: normalizedExportType,
+                base_url:    normalizedBaseUrl,
             }),
         });
         console.log(`[Slapshot] download_result ← status ${resp.status}`);
         if (!resp.ok) {
-            const body = await resp.text().catch(() => "");
-            console.error(`[Slapshot] download_result error body:`, body);
-            alert(`Slapshot: download request failed (${resp.status}).`);
-            return;
+            const bodyText = await resp.text().catch(() => "");
+            let backendMsg = "";
+            try {
+                const parsed = JSON.parse(bodyText);
+                backendMsg = parsed?.error ? String(parsed.error) : "";
+            } catch {
+                backendMsg = bodyText;
+            }
+            console.error(`[Slapshot] download_result error body:`, bodyText);
+            alert(
+                backendMsg
+                    ? `Slapshot: download request failed (${resp.status}) - ${backendMsg}`
+                    : `Slapshot: download request failed (${resp.status}).`
+            );
+            return null;
         }
         const data = await resp.json();
         console.log(`[Slapshot] download_result response:`, data);
-        const downloadUrl = data.download_url || data.url || data.presigned_url;
-        if (!downloadUrl) {
-            console.warn(`[Slapshot] no download URL in response keys:`, Object.keys(data));
-            alert("Slapshot: no download URL in response.");
-            return;
-        }
-        console.log(`[Slapshot] triggering download from:`, downloadUrl);
-        const a = document.createElement("a");
-        a.href = downloadUrl;
-        a.target = "_blank";
-        a.rel = "noopener";
-        a.download = "";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+        return data;
     } catch (err) {
         alert(`Slapshot: download error — ${err.message}`);
+        return null;
+    }
+}
+
+function _openDownload(downloadUrl) {
+    console.log(`[Slapshot] triggering download from:`, downloadUrl);
+    const a = document.createElement("a");
+    a.href = downloadUrl;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.download = "";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+}
+
+
+function _resolvePrimaryExportType(node) {
+    const defs = NODE_DOWNLOADS[node.type] ?? [];
+    const first = defs[0]?.exportType;
+    if (!first) return null;
+    const resolved = typeof first === "function" ? first(node) : first;
+    return String(resolved ?? "").trim();
+}
+
+function _setDownloadButtonsEnabled(node, enabled) {
+    for (const btn of (node._downloadBtns ?? [])) {
+        btn.name = enabled ? btn._enabledLabel : (btn._disabledLabel ?? btn.name);
+        btn.disabled = !enabled;
+        btn.tooltip = enabled
+            ? undefined
+            : `${btn._disabledLabel ?? "Download"} can only be downloaded after inference completion`;
     }
 }
 
