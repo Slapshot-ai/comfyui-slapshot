@@ -13,13 +13,16 @@ Automates the full rotoscoping pipeline — upload a video with optional referen
 | Input | Type | Description |
 |---|---|---|
 | `video` | VIDEO | Source video (`.mp4` or `.mov`) |
-| `api_key` | STRING | Your Slapshot API key |
 | `mask_00` … `mask_09` | IMAGE _(optional)_ | Up to 10 reference mask frames. Each must be loaded from a file named with a 5-digit frame number, e.g. `00014.png` |
 
 **Download buttons (enabled after inference)**
 
 - **Download Hard Mattes** — binary alpha mask per frame
 - **Download MB Mattes** — motion-blur-aware matte per frame
+
+**Previous job download**
+
+Paste a job ID into the **job ID** field and click **Download Previous Job Result** to fetch results from an earlier run without re-submitting. This also enables the download buttons above for that job.
 
 ---
 
@@ -33,11 +36,14 @@ Generates a depth map video from a source video.
 |---|---|---|
 | `video` | VIDEO | Source video (`.mp4` or `.mov`) |
 | `export_type` | COMBO | Output format — `JPG` or `MOV` (default: `JPG`) |
-| `api_key` | STRING | Your Slapshot API key |
 
 **Download buttons (enabled after inference)**
 
 - **Download Depth Map** — downloads the depth map in the selected format
+
+**Previous job download**
+
+Paste a job ID into the **job ID** field and click **Download Previous Job Result** to fetch results from an earlier run without re-submitting. This also enables the download buttons above for that job.
 
 ---
 
@@ -50,7 +56,6 @@ Runs camera tracking on a source video with optional camera and scene parameters
 | Input | Type | Default | Description                                                                                                  |
 |---|---|---|--------------------------------------------------------------------------------------------------------------|
 | `video` | VIDEO | — | Source video (`.mp4` or `.mov`)                                                                              |
-| `api_key` | STRING | — | Your Slapshot API key                                                                                        |
 | `working_fps` | STRING _(optional)_ | — | Working frames per second (e.g. `24.0`)                                                                      |
 | `lens` | STRING _(optional)_ | — | Lens focal length in mm                                                                                      |
 | `fix_focal_length` | COMBO _(optional)_ | `False` | `False` = Floating, `True` = Fixed                                                                           |
@@ -67,6 +72,10 @@ All camera fields are optional. `sensor_width` and `sensor_height` must be provi
 
 - **Download Tracking Data** — downloads the tracking results
 
+**Previous job download**
+
+Paste a job ID into the **job ID** field and click **Download Previous Job Result** to fetch results from an earlier run without re-submitting. This also enables the download buttons above for that job.
+
 ---
 
 ### Slapshot — Smart Vectors
@@ -78,7 +87,6 @@ Generates smart vector data from a source video with an optional single referenc
 | Input | Type | Description |
 |---|---|---|
 | `video` | VIDEO | Source video (`.mp4` or `.mov`) |
-| `api_key` | STRING | Your Slapshot API key |
 | `mask` | IMAGE _(optional)_ | ROI mask — a black background image with the region of interest colored. Must be loaded from a file named with a 5-digit frame number, e.g. `00034.png` |
 
 When provided, the mask filename determines the keyframe automatically: `00018.png` → keyframe 19. The mask and keyframe are sent as `roi_mask_path` and `keyframe` in the request metadata.
@@ -87,11 +95,15 @@ When provided, the mask filename determines the keyframe automatically: `00018.p
 
 - **Download Smart Vectors** — downloads the smart vector results
 
+**Previous job download**
+
+Paste a job ID into the **job ID** field and click **Download Previous Job Result** to fetch results from an earlier run without re-submitting. This also enables the download buttons above for that job.
+
 ---
 
 ## How it works
 
-All three nodes follow the same pipeline:
+All nodes follow the same pipeline:
 
 1. **Uploads** the video (and mask frames, for Rotoscoping) to Slapshot via presigned S3 URLs.
 2. **Submits** a job to the Slapshot API.
@@ -99,11 +111,47 @@ All three nodes follow the same pipeline:
 4. **Notifies** you via the email associated with your API key when the job completes.
 5. **Enables** download button(s) on the node so you can pull results directly from ComfyUI.
 
+### Downloading results from a previous job
+
+Every node has a **job ID** text field and a **Download Previous Job Result** button. If you already have a job ID (from a prior run or from the Slapshot dashboard), you can skip re-submitting:
+
+1. Paste the job ID into the **job ID** field on the node.
+2. Click **Download Previous Job Result**.
+3. The node fetches the download URL and triggers the file download immediately. Download is available only for the format selected when the job was originally submitted. This also enables the download buttons above for that job.
+
 ## API Key
 
-Enter your API key in the `api_key` widget on any node, or set the `SLAPSHOT_API_KEY` environment variable in ComfyUI's `.env` file. The key is persisted in your browser's local storage so you only need to enter it once.
+### Getting your API key
 
-Don't have a key? Get one at [slapshot.ai](https://slapshot.ai).
+1. Go to [app.slapshot.ai](https://app.slapshot.ai/) and sign in (or create a free account).
+2. Click your profile icon in the top-right and open **Profile**.
+3. Select the **Developer** tab.
+4. Click **Generate API Key** and copy the key.
+
+### Setting your API key
+
+Choose one of the two methods below. Restart ComfyUI after making changes.
+
+**Option A — `.env` file (recommended)**
+
+Add the following line to the `.env` file in your ComfyUI root directory (create it if it doesn't exist):
+
+```
+SLAPSHOT_API_KEY=your-api-key-here
+```
+
+**Option B — `config.ini` file**
+
+Open (or create) `config.ini` inside the `comfyui-slapshot` plugin directory and set:
+
+```ini
+[API]
+SLAPSHOT_API_KEY = your-api-key-here
+```
+
+The `.env` value takes precedence over `config.ini` if both are set.
+
+If no API key is found when a Slapshot node is added to the graph, a dialog will appear with a **Get API Key** button that takes you directly to the developer settings page.
 
 ## Installation
 
@@ -123,4 +171,4 @@ Restart ComfyUI.
 ## Requirements
 
 - Python package: `requests` (installed automatically via `requirements.txt`)
-- A Slapshot API key — sign up at [slapshot.ai](https://slapshot.ai)
+- A Slapshot API key — sign up at [app.slapshot.ai](https://app.slapshot.ai/)

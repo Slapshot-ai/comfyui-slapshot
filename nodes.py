@@ -14,6 +14,7 @@ import time
 import json
 import threading
 import tempfile
+import configparser
 import torch
 import requests
 import folder_paths
@@ -38,15 +39,28 @@ def _load_dotenv():
     except Exception as exc:
         print(f"[RotoscopingMasks] Could not load .env: {exc}")
 
+def _load_config_ini() -> str:
+    """Load SLAPSHOT_API_KEY from config.ini in the plugin directory."""
+    try:
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
+        if not os.path.isfile(config_path):
+            return ""
+        config = configparser.ConfigParser()
+        config.read(config_path)
+        return config.get("API", "SLAPSHOT_API_KEY", fallback="").strip()
+    except Exception as exc:
+        print(f"[RotoscopingMasks] Could not load config.ini: {exc}")
+        return ""
+
 _load_dotenv()
 
 # BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.ai").rstrip("/")
 BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.work").rstrip("/")
-_ENV_API_KEY = os.environ.get("SLAPSHOT_API_KEY", "").strip()
+_ENV_API_KEY = os.environ.get("SLAPSHOT_API_KEY", "").strip() or _load_config_ini()
 
 POLL_INTERVAL_SECONDS = 60
 REQUEST_TIMEOUT = 30
-MAX_POLL_SECONDS = 5 * 60 * 60  # 5 hours
+MAX_POLL_SECONDS = 10 * 60 * 60  # 10 hours
 
 _MASK_FILENAME_RE = re.compile(r"^\d{5}\.png$")
 
@@ -90,6 +104,10 @@ try:
         except Exception as exc:
             return _web.json_response({"error": str(exc)}, status=500)
 
+    @_PS.instance.routes.get("/slapshot/api_key_status")
+    async def _slapshot_api_key_status(request):
+        return _web.json_response({"configured": bool(_ENV_API_KEY)})
+
 except Exception:
     pass
 
@@ -126,7 +144,7 @@ def _get_presigned_upload_url(base_url: str, api_key: str, upload_id: str,
         if code in (401, 403):
             raise PermissionError(
                 f"[RotoscopingMasks] Invalid or unauthorized API key ({code}). "
-                "Check the api_key widget or your SLAPSHOT_API_KEY environment variable."
+                "Check your SLAPSHOT_API_KEY in .env or config.ini."
             )
         raise RuntimeError(
             f"[RotoscopingMasks] Failed to get upload URL ({code}): {resp.text[:300]}"
@@ -213,7 +231,7 @@ def _save_mask_to_tempfile(frame, frame_idx: int) -> tuple:
 
 # ── Video helpers ─────────────────────────────────────────────────────────────
 
-_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+_VIDEO_EXTS = {".mp4", ".mov"}
 
 
 def _extract_video_filename(video) -> str | None:
@@ -294,6 +312,24 @@ def _get_video_frame_count(video_path: str) -> int | None:
             return count
     except Exception:
         pass
+    try:
+        import subprocess
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-count_packets",
+                "-show_entries", "stream=nb_read_packets",
+                "-of", "csv=p=0",
+                video_path,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        count = int(result.stdout.strip())
+        if count > 0:
+            return count
+    except Exception:
+        pass
     return None
 
 
@@ -303,18 +339,31 @@ def _save_video_locally(video) -> tuple:
     print(f"[RotoscopingMasks] Detected video filename: {raw!r} "
           f"(object type: {type(video).__name__})")
 
-    filename = raw if raw else "video.mp4"
-    if not filename.lower().endswith((".mp4", ".mov")):
-        filename = os.path.splitext(filename)[0] + ".mp4"
-
     # Prefer a direct copy of the original file — preserves codec/container and
     # avoids ProRes-in-mp4 transcoding errors that save_to() can trigger.
     source_file = _find_video_source_file(video, raw)
     print(f"[RotoscopingMasks] Resolved source file: {source_file!r}")
 
+    source_ext = os.path.splitext(source_file)[1].lower() if source_file else ""
+    raw_ext = os.path.splitext(raw)[1].lower() if raw else ""
+
+    if raw_ext and raw_ext not in _VIDEO_EXTS:
+        raise ValueError(
+            f"[RotoscopingMasks] Unsupported video extension '{raw_ext}'. "
+            "Only .mp4 and .mov are allowed."
+        )
+
+    if source_ext and source_ext not in _VIDEO_EXTS:
+        raise ValueError(
+            f"[RotoscopingMasks] Unsupported video extension '{source_ext}'. "
+            "Only .mp4 and .mov are allowed."
+        )
+
+    filename = raw if raw else f"video{source_ext or '.mp4'}"
+
     if source_file:
         import shutil
-        ext = os.path.splitext(filename)[1]
+        ext = os.path.splitext(filename)[1].lower()
         fd, path = tempfile.mkstemp(suffix=ext, prefix="slapshot_video_")
         os.close(fd)
         shutil.copy2(source_file, path)
@@ -384,6 +433,46 @@ def _headers(api_key: str) -> dict:
     }
 
 
+def _check_user_limit(api_key: str, video_frame_count: int | None, log_prefix: str) -> None:
+    """Raises ValueError if the user's free-tier frame limit is exceeded."""
+    limit_url = f"{BASE_URL}/api/user/limit"
+    try:
+        resp = requests.get(limit_url, headers=_headers(api_key), timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError:
+        code = resp.status_code
+        if code in (401, 403):
+            raise PermissionError(
+                f"[{log_prefix}] Invalid or unauthorized API key ({code}). "
+                "Check your SLAPSHOT_API_KEY in .env or config.ini."
+            )
+        print(f"[{log_prefix}] Could not check user limit ({code}): {resp.text[:200]} — skipping check.")
+        return
+    except Exception as exc:
+        print(f"[{log_prefix}] Could not check user limit: {exc} — skipping check.")
+        return
+
+    data = resp.json()
+    is_above_limit = data.get("is_above_limit", False)
+    subscription_tier = data.get("subscription_tier", "")
+    frames_inferenced = data.get("frames_inferenced") or 0
+
+    FREE_TIER_LIMIT = 1000
+
+    if is_above_limit:
+        raise ValueError(
+            "Free tier limit of 1000 frames has been reached. Please upgrade to keep using APIs."
+        )
+
+    if subscription_tier == "free_tier" and not is_above_limit:
+        incoming = video_frame_count or 0
+        if frames_inferenced + incoming >= FREE_TIER_LIMIT:
+            raise ValueError(
+                f"Failed to run workflow. Running this workflow will breach the free tier limit of 1000 frames, "
+                f"already inferenced {frames_inferenced} frames. Please upgrade to keep using APIs."
+            )
+
+
 # ── Shared submit + poll ──────────────────────────────────────────────────────
 
 def _submit_and_poll(api_key: str, video_key: str, service_payload: dict,
@@ -448,7 +537,7 @@ def _submit_and_poll(api_key: str, video_key: str, service_payload: dict,
 
             if time.monotonic() - poll_start > MAX_POLL_SECONDS:
                 result_box["error"] = RuntimeError(
-                    f"[{log_prefix}] Job {job_id} did not complete within 5 hours "
+                    f"[{log_prefix}] Job {job_id} did not complete within 10 hours "
                     f"({poll_num} polls). Giving up."
                 )
                 done_event.set()
@@ -540,25 +629,17 @@ class SlapshotRotoscopingNode:
         return {
             "required": {
                 "video": ("VIDEO",),
-                "api_key": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "your-api-key (or set SLAPSHOT_API_KEY env var)",
-                    # "password": True,
-                }),
             },
             "optional": optional,
             "hidden": {"unique_id": "UNIQUE_ID", "prompt": "PROMPT"},
         }
 
-    def run_rotoscoping_with_masks(self, video, api_key, unique_id=None, prompt=None, **kwargs):
-        api_key = (api_key or "").strip()
-        if not api_key or api_key.lower() == "none":
-            api_key = _ENV_API_KEY
+    def run_rotoscoping_with_masks(self, video, unique_id=None, prompt=None, **kwargs):
+        api_key = _ENV_API_KEY
         if not api_key:
-            raise ValueError(
-                "[RotoscopingMasks] API Key is required. "
-                "Enter it in the node widget or set the SLAPSHOT_API_KEY environment variable."
+            raise PermissionError(
+                "[RotoscopingMasks] No API key configured. "
+                "Set SLAPSHOT_API_KEY in your .env file or config.ini and restart ComfyUI."
             )
 
         def progress(text: str):
@@ -595,20 +676,25 @@ class SlapshotRotoscopingNode:
         try:
             video_frame_count = _get_video_frame_count(video_local)
             print(f"[RotoscopingMasks] Video frame count: {video_frame_count}")
-            if video_frame_count is not None:
-                if video_frame_count > 3500:
+            if not video_frame_count:
+                raise ValueError(
+                    f"[RotoscopingMasks] Input video has no frames, Check input video."
+                )
+            if video_frame_count > 3500:
+                raise ValueError(
+                    f"[RotoscopingMasks] Input video should not exceed 3500 frames "
+                    f"(got {video_frame_count})."
+                )
+            for _, frame_number, png_name in mask_inputs:
+                if frame_number >= video_frame_count:
                     raise ValueError(
-                        f"[RotoscopingMasks] Input video should not exceed 3500 frames "
-                        f"(got {video_frame_count})."
+                        f"[RotoscopingMasks] Mask '{png_name}' targets frame "
+                        f"{frame_number + 1} but the video only has "
+                        f"{video_frame_count} frame(s). "
+                        f"Valid range: 00000–{video_frame_count - 1:05d}.png."
                     )
-                for _, frame_number, png_name in mask_inputs:
-                    if frame_number >= video_frame_count:
-                        raise ValueError(
-                            f"[RotoscopingMasks] Mask '{png_name}' targets frame "
-                            f"{frame_number + 1} but the video only has "
-                            f"{video_frame_count} frame(s). "
-                            f"Valid range: 00000–{video_frame_count - 1:05d}.png."
-                        )
+
+            _check_user_limit(api_key, video_frame_count, "RotoscopingMasks")
 
             progress(f"Uploading video: {video_filename}...")
             upload_url, video_key = _get_presigned_upload_url(BASE_URL, api_key, upload_id, "video", video_filename)
@@ -671,23 +757,16 @@ class SlapshotDepthMapNode:
             "required": {
                 "video": ("VIDEO",),
                 "export_type": (["JPG", "MOV"],),
-                "api_key": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "your-api-key (or set SLAPSHOT_API_KEY env var)",
-                }),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    def run_depth_map(self, video, export_type="JPG", api_key="", unique_id=None):
-        api_key = (api_key or "").strip()
-        if not api_key or api_key.lower() == "none":
-            api_key = _ENV_API_KEY
+    def run_depth_map(self, video, export_type="JPG", unique_id=None):
+        api_key = _ENV_API_KEY
         if not api_key:
-            raise ValueError(
-                "[DepthMap] API Key is required. "
-                "Enter it in the node widget or set the SLAPSHOT_API_KEY environment variable."
+            raise PermissionError(
+                "[DepthMap] No API key configured. "
+                "Set SLAPSHOT_API_KEY in your .env file or config.ini and restart ComfyUI."
             )
 
         def progress(text: str):
@@ -698,6 +777,19 @@ class SlapshotDepthMapNode:
 
         video_local, video_filename = _save_video_locally(video)
         try:
+            video_frame_count = _get_video_frame_count(video_local)
+            print(f"[DepthMap] Video frame count: {video_frame_count}")
+            if not video_frame_count:
+                raise ValueError(
+                    f"[RotoscopingMasks] Input video has no frames, Check input video."
+                )
+            if video_frame_count > 3500:
+                raise ValueError(
+                    f"[DepthMap] Input video should not exceed 3500 frames "
+                    f"(got {video_frame_count})."
+                )
+            _check_user_limit(api_key, video_frame_count, "DepthMap")
+
             progress(f"Uploading video: {video_filename}...")
             upload_url, video_key = _get_presigned_upload_url(
                 BASE_URL, api_key, upload_id, "video", video_filename
@@ -742,11 +834,6 @@ class SlapshotTrackingNode:
         return {
             "required": {
                 "video": ("VIDEO",),
-                "api_key": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "your-api-key (or set SLAPSHOT_API_KEY env var)",
-                }),
             },
             "optional": {
                 "working_fps":              ("STRING", {"default": "", "multiline": False, "placeholder": "e.g. 23.98"}),
@@ -762,20 +849,18 @@ class SlapshotTrackingNode:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    def run_tracking(self, video, api_key,
+    def run_tracking(self, video,
                      working_fps="",
                      lens="", fix_focal_length="False",
                      sensor_width="", sensor_height="", fix_sensor_size="True",
                      estimated_closest_point="", estimated_farthest_point="",
                      calculate_distortion="False",
                      unique_id=None):
-        api_key = (api_key or "").strip()
-        if not api_key or api_key.lower() == "none":
-            api_key = _ENV_API_KEY
+        api_key = _ENV_API_KEY
         if not api_key:
-            raise ValueError(
-                "[Tracking] API Key is required. "
-                "Enter it in the node widget or set the SLAPSHOT_API_KEY environment variable."
+            raise PermissionError(
+                "[Tracking] No API key configured. "
+                "Set SLAPSHOT_API_KEY in your .env file or config.ini and restart ComfyUI."
             )
 
         def _parse_float(val, name):
@@ -825,6 +910,19 @@ class SlapshotTrackingNode:
 
         video_local, video_filename = _save_video_locally(video)
         try:
+            video_frame_count = _get_video_frame_count(video_local)
+            print(f"[Tracking] Video frame count: {video_frame_count}")
+            if not video_frame_count:
+                raise ValueError(
+                    f"[RotoscopingMasks] Input video has no frames, Check input video."
+                )
+            if video_frame_count > 3500:
+                raise ValueError(
+                    f"[Tracking] Input video should not exceed 3500 frames "
+                    f"(got {video_frame_count})."
+                )
+            _check_user_limit(api_key, video_frame_count, "Tracking")
+
             progress(f"Uploading video: {video_filename}...")
             upload_url, video_key = _get_presigned_upload_url(
                 BASE_URL, api_key, upload_id, "video", video_filename
@@ -867,11 +965,6 @@ class SlapshotSmartVectorsNode:
         return {
             "required": {
                 "video": ("VIDEO",),
-                "api_key": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "your-api-key (or set SLAPSHOT_API_KEY env var)",
-                }),
             },
             "optional": {
                 "mask": ("IMAGE",),
@@ -879,14 +972,12 @@ class SlapshotSmartVectorsNode:
             "hidden": {"unique_id": "UNIQUE_ID", "prompt": "PROMPT"},
         }
 
-    def run_smart_vectors(self, video, api_key, mask=None, unique_id=None, prompt=None):
-        api_key = (api_key or "").strip()
-        if not api_key or api_key.lower() == "none":
-            api_key = _ENV_API_KEY
+    def run_smart_vectors(self, video, mask=None, unique_id=None, prompt=None):
+        api_key = _ENV_API_KEY
         if not api_key:
-            raise ValueError(
-                "[SmartVectors] API Key is required. "
-                "Enter it in the node widget or set the SLAPSHOT_API_KEY environment variable."
+            raise PermissionError(
+                "[SmartVectors] No API key configured. "
+                "Set SLAPSHOT_API_KEY in your .env file or config.ini and restart ComfyUI."
             )
 
         has_mask = mask is not None
@@ -917,6 +1008,26 @@ class SlapshotSmartVectorsNode:
         video_local, video_filename = _save_video_locally(video)
         video_key = None
         try:
+            video_frame_count = _get_video_frame_count(video_local)
+            print(f"[SmartVectors] Video frame count: {video_frame_count}")
+            if not video_frame_count:
+                raise ValueError(
+                    f"[RotoscopingMasks] Input video has no frames, Check input video."
+                )
+            if video_frame_count > 3500:
+                raise ValueError(
+                    f"[SmartVectors] Input video should not exceed 3500 frames "
+                    f"(got {video_frame_count})."
+                )
+            if has_mask and kf >= video_frame_count:
+                raise ValueError(
+                    f"[SmartVectors] Mask '{png_name}' targets frame "
+                    f"{kf} but the video only has "
+                    f"{video_frame_count} frame(s). "
+                    f"Valid range: 00000–{video_frame_count - 1:05d}.png."
+                )
+            _check_user_limit(api_key, video_frame_count, "SmartVectors")
+
             progress(f"Uploading video: {video_filename}...")
             upload_url, video_key = _get_presigned_upload_url(
                 BASE_URL, api_key, upload_id, "video", video_filename
