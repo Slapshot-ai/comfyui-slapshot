@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-slapshot"
+version = "0.1.6"
+description = "Slapshot nodes for ComfyUI — Rotoscoping, Depth Map, Camera Tracking, and Smart Vectors. Submits video jobs to the Slapshot API and reports completion. Visit https://github.com/slapshot-ai/comfyui-slapshot for details."
+license = { file = "LICENSE" }
+dependencies = ["requests"]
+
+[project.urls]
+Repository = "https://github.com/slapshot-ai/comfyui-slapshot"
+
+[tool.comfy]
+PublisherId = "slapshot"
+DisplayName = "ComfyUI-Slapshot"
+Icon = "https://hotspring-admin-uploads.s3.us-west-2.amazonaws.com/admin-public-media/ss-white-horizontal.png"
