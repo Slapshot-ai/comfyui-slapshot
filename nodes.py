@@ -54,8 +54,7 @@ def _load_config_ini() -> str:
 
 _load_dotenv()
 
-# BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.ai").rstrip("/")
-BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.work").rstrip("/")
+BASE_URL = os.environ.get("SLAPSHOT_BASE_URL", "https://autopilot.slapshot.ai").rstrip("/")
 _ENV_API_KEY = os.environ.get("SLAPSHOT_API_KEY", "").strip() or _load_config_ini()
 
 POLL_INTERVAL_SECONDS = 60

@@ -150,7 +150,7 @@ const PREVIEW_NODES = [
     "Slapshot_Smart_Vectors",
 ];
 
-const DEFAULT_SLAPSHOT_BASE_URL = "https://autopilot.slapshot.work";
+const DEFAULT_SLAPSHOT_BASE_URL = "https://autopilot.slapshot.ai";
 
 const NODE_DOWNLOADS = {
     "Slapshot_Rotoscoping":         [
