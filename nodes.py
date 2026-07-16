@@ -37,7 +37,7 @@ def _load_dotenv():
                 if key and key not in os.environ:
                     os.environ[key] = val
     except Exception as exc:
-        print(f"[RotoscopingMasks] Could not load .env: {exc}")
+        print(f"Could not load .env: {exc}")
 
 def _load_config_ini() -> str:
     """Load SLAPSHOT_API_KEY from config.ini in the plugin directory."""
@@ -49,7 +49,7 @@ def _load_config_ini() -> str:
         config.read(config_path)
         return config.get("API", "SLAPSHOT_API_KEY", fallback="").strip()
     except Exception as exc:
-        print(f"[RotoscopingMasks] Could not load config.ini: {exc}")
+        print(f"Could not load config.ini: {exc}")
         return ""
 
 _load_dotenv()
@@ -89,11 +89,11 @@ try:
             return _web.json_response({"error": "Missing required parameters"}, status=400)
 
         url = f"{base_url}/api/comfyui/{job_id}/result?export_type={export_type}"
-        print(f"[RotoscopingMasks] download_result → GET {url}")
+        print(f"download_result → GET {url}")
         resp = None
         try:
             resp = requests.get(url, headers={"x-api-key": api_key}, timeout=REQUEST_TIMEOUT)
-            print(f"[RotoscopingMasks] download_result ← {resp.status_code}: {resp.text[:300]}")
+            print(f"download_result ← {resp.status_code}: {resp.text[:300]}")
             resp.raise_for_status()
             return _web.json_response(resp.json())
         except requests.exceptions.HTTPError:
@@ -117,7 +117,7 @@ def _send_progress(node_id, text: str) -> None:
     """Push a status text update to the node's preview widget via websocket."""
     if node_id is None:
         return
-    print(f"[RotoscopingMasks] {text}")
+    print(f"{text}")
     try:
         from server import PromptServer
         PromptServer.instance.send_sync("slapshot_progress", {
@@ -142,18 +142,18 @@ def _get_presigned_upload_url(base_url: str, api_key: str, upload_id: str,
         code = resp.status_code
         if code in (401, 403):
             raise PermissionError(
-                f"[RotoscopingMasks] Invalid or unauthorized API key ({code}). "
+                f"Invalid or unauthorized API key ({code}). "
                 "Check your SLAPSHOT_API_KEY in .env or config.ini."
             )
         raise RuntimeError(
-            f"[RotoscopingMasks] Failed to get upload URL ({code}): {resp.text[:300]}"
+            f"Failed to get upload URL ({code}): {resp.text[:300]}"
         )
     data = resp.json()
     upload_url = data.get("upload_url")
     s3_key = data.get("s3_key")
     if not upload_url or not s3_key:
         raise RuntimeError(
-            f"[RotoscopingMasks] Missing upload_url or s3_key in upload response: {resp.text[:300]}"
+            f"Missing upload_url or s3_key in upload response: {resp.text[:300]}"
         )
     return upload_url, s3_key
 
@@ -175,7 +175,7 @@ def _upload_to_presigned_url(presigned_url: str, local_path: str) -> None:
 def _validate_mask_filename(name: str) -> None:
     if not _MASK_FILENAME_RE.match(name):
         raise ValueError(
-            f"[RotoscopingMasks] Mask filename '{name}' does not match the required "
+            f"Mask filename '{name}' does not match the required "
             f"pattern '{{num:05d}}.png' (e.g. '00000.png')."
         )
 
@@ -195,7 +195,7 @@ def _iter_image_frames(tensor):
         for i in range(tensor.shape[0]):
             yield tensor[i]                    # (B,H,W,C) — batch of IMAGE frames
     else:
-        raise ValueError(f"[RotoscopingMasks] Unsupported tensor rank: {ndim}")
+        raise ValueError(f"Unsupported tensor rank: {ndim}")
 
 
 def _save_mask_to_tempfile(frame, frame_idx: int) -> tuple:
@@ -212,7 +212,7 @@ def _save_mask_to_tempfile(frame, frame_idx: int) -> tuple:
         else:
             arr = 0.2989 * arr[:, :, 0] + 0.5870 * arr[:, :, 1] + 0.1140 * arr[:, :, 2]
     elif arr.ndim != 2:
-        raise ValueError(f"[RotoscopingMasks] Unexpected frame shape: {arr.shape}")
+        raise ValueError(f"Unexpected frame shape: {arr.shape}")
 
     gray = (arr.clip(0.0, 1.0) * 255.0).astype("uint8")
 
@@ -335,26 +335,31 @@ def _get_video_frame_count(video_path: str) -> int | None:
 def _save_video_locally(video) -> tuple:
     """Save a ComfyUI VIDEO object to a temp file. Returns (local_path, filename)."""
     raw = _extract_video_filename(video)
-    print(f"[RotoscopingMasks] Detected video filename: {raw!r} "
+    if not raw:
+        raise ValueError(
+            f"Unsupported video extension. Only .mp4 and .mov are allowed."
+        )
+    
+    print(f"Detected video filename: {raw!r} "
           f"(object type: {type(video).__name__})")
 
     # Prefer a direct copy of the original file — preserves codec/container and
     # avoids ProRes-in-mp4 transcoding errors that save_to() can trigger.
     source_file = _find_video_source_file(video, raw)
-    print(f"[RotoscopingMasks] Resolved source file: {source_file!r}")
+    print(f"Resolved source file: {source_file!r}")
 
     source_ext = os.path.splitext(source_file)[1].lower() if source_file else ""
     raw_ext = os.path.splitext(raw)[1].lower() if raw else ""
 
     if raw_ext and raw_ext not in _VIDEO_EXTS:
         raise ValueError(
-            f"[RotoscopingMasks] Unsupported video extension '{raw_ext}'. "
+            f"Unsupported video extension '{raw_ext}'. "
             "Only .mp4 and .mov are allowed."
         )
 
     if source_ext and source_ext not in _VIDEO_EXTS:
         raise ValueError(
-            f"[RotoscopingMasks] Unsupported video extension '{source_ext}'. "
+            f"Unsupported video extension '{source_ext}'. "
             "Only .mp4 and .mov are allowed."
         )
 
@@ -377,7 +382,7 @@ def _save_video_locally(video) -> tuple:
         else:
             os.unlink(path)
             raise RuntimeError(
-                "[RotoscopingMasks] VIDEO input does not expose save_to() or a resolvable "
+                "VIDEO input does not expose save_to() or a resolvable "
                 "path; upgrade ComfyUI or use a compatible VIDEO source."
             )
         return path
@@ -417,7 +422,7 @@ def _mask_filename_from_prompt(unique_id, prompt, slot_name: str) -> str | None:
     name = os.path.basename(image_val) if isinstance(image_val, str) else ""
     if not _MASK_FILENAME_RE.match(name):
         raise ValueError(
-            f"[RotoscopingMasks] Mask '{name}' connected to '{slot_name}' does not follow "
+            f"Mask '{name}' connected to '{slot_name}' does not follow "
             f"the required naming pattern — expected a 5-digit frame number like '00014.png'."
         )
     return name
@@ -637,7 +642,7 @@ class SlapshotRotoscopingNode:
         api_key = _ENV_API_KEY
         if not api_key:
             raise PermissionError(
-                "[RotoscopingMasks] No API key configured. "
+                "No API key configured. "
                 "Set SLAPSHOT_API_KEY in your .env file or config.ini and restart ComfyUI."
             )
 
@@ -658,36 +663,36 @@ class SlapshotRotoscopingNode:
             fname = _mask_filename_from_prompt(unique_id, prompt, slot)
             if fname:
                 frame_number = int(os.path.splitext(fname)[0])
-                print(f"[RotoscopingMasks] {slot} → filename '{fname}' (frame {frame_number})")
+                print(f"{slot} → filename '{fname}' (frame {frame_number})")
             else:
                 frame_number = fallback_idx
-                print(f"[RotoscopingMasks] {slot} → no filename found, using fallback index {frame_number}")
+                print(f"{slot} → no filename found, using fallback index {frame_number}")
             mask_inputs.append((tensor, frame_number, f"{frame_number:05d}.png"))
             fallback_idx += 1
 
         # ── Generate upload UUID (shared across video and all masks) ─────────
         upload_id = str(uuid.uuid4())
-        print(f"[RotoscopingMasks] Upload ID: {upload_id}")
+        print(f"Upload ID: {upload_id}")
 
         # ── Upload video ──────────────────────────────────────────────────────
         video_local, video_filename = _save_video_locally(video)
         video_key = None
         try:
             video_frame_count = _get_video_frame_count(video_local)
-            print(f"[RotoscopingMasks] Video frame count: {video_frame_count}")
+            print(f"Video frame count: {video_frame_count}")
             if not video_frame_count:
                 raise ValueError(
-                    f"[RotoscopingMasks] Input video has no frames, Check input video."
+                    f"Input video has no frames, Check input video."
                 )
             if video_frame_count > 3500:
                 raise ValueError(
-                    f"[RotoscopingMasks] Input video should not exceed 3500 frames "
+                    f"Input video should not exceed 3500 frames "
                     f"(got {video_frame_count})."
                 )
             for _, frame_number, png_name in mask_inputs:
                 if frame_number >= video_frame_count:
                     raise ValueError(
-                        f"[RotoscopingMasks] Mask '{png_name}' targets frame "
+                        f"Mask '{png_name}' targets frame "
                         f"{frame_number + 1} but the video only has "
                         f"{video_frame_count} frame(s). "
                         f"Valid range: 00000–{video_frame_count - 1:05d}.png."
@@ -780,7 +785,7 @@ class SlapshotDepthMapNode:
             print(f"[DepthMap] Video frame count: {video_frame_count}")
             if not video_frame_count:
                 raise ValueError(
-                    f"[RotoscopingMasks] Input video has no frames, Check input video."
+                    f"Input video has no frames, Check input video."
                 )
             if video_frame_count > 3500:
                 raise ValueError(
@@ -913,7 +918,7 @@ class SlapshotTrackingNode:
             print(f"[Tracking] Video frame count: {video_frame_count}")
             if not video_frame_count:
                 raise ValueError(
-                    f"[RotoscopingMasks] Input video has no frames, Check input video."
+                    f"Input video has no frames, Check input video."
                 )
             if video_frame_count > 3500:
                 raise ValueError(
@@ -1011,7 +1016,7 @@ class SlapshotSmartVectorsNode:
             print(f"[SmartVectors] Video frame count: {video_frame_count}")
             if not video_frame_count:
                 raise ValueError(
-                    f"[RotoscopingMasks] Input video has no frames, Check input video."
+                    f"Input video has no frames, Check input video."
                 )
             if video_frame_count > 3500:
                 raise ValueError(

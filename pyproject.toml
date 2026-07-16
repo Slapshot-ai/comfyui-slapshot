@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-slapshot"
-version = "0.1.7"
+version = "0.1.8"
 description = "Slapshot nodes for ComfyUI — Rotoscoping, Depth Map, Camera Tracking, and Smart Vectors. Submits video jobs to the Slapshot API and reports completion. Visit https://github.com/slapshot-ai/comfyui-slapshot for details."
 license = { file = "LICENSE" }
 dependencies = ["requests"]
