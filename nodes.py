@@ -957,9 +957,9 @@ class SlapshotTrackingNode:
         }
 
 
-class SlapshotSmartVectorsNode:
+class SlapshotMotionVectorsNode:
     CATEGORY = "Slapshot"
-    FUNCTION = "run_smart_vectors"
+    FUNCTION = "run_motion_vectors"
     OUTPUT_NODE = True
     RETURN_TYPES = ()
     RETURN_NAMES = ()
@@ -976,11 +976,11 @@ class SlapshotSmartVectorsNode:
             "hidden": {"unique_id": "UNIQUE_ID", "prompt": "PROMPT"},
         }
 
-    def run_smart_vectors(self, video, mask=None, unique_id=None, prompt=None):
+    def run_motion_vectors(self, video, mask=None, unique_id=None, prompt=None):
         api_key = _ENV_API_KEY
         if not api_key:
             raise PermissionError(
-                "[SmartVectors] No API key configured. "
+                "[MotionVectors] No API key configured. "
                 "Set SLAPSHOT_API_KEY in your .env file or config.ini and restart ComfyUI."
             )
 
@@ -994,43 +994,43 @@ class SlapshotSmartVectorsNode:
             png_name = _mask_filename_from_prompt(unique_id, prompt, "mask")
             if png_name is None:
                 raise ValueError(
-                    "[SmartVectors] Could not determine the ROI mask filename. "
+                    "[MotionVectors] Could not determine the ROI mask filename. "
                     "Connect the mask from a Load Image node whose file is named "
                     "with a 5-digit frame number, e.g. '00018.png'."
                 )
             mask_frame = int(os.path.splitext(png_name)[0])
             kf = mask_frame + 1
-            print(f"[SmartVectors] ROI mask validated: {png_name} → keyframe={kf}")
+            print(f"[MotionVectors] ROI mask validated: {png_name} → keyframe={kf}")
 
         def progress(text: str):
             _send_progress(unique_id, text)
 
         upload_id = str(uuid.uuid4())
-        print(f"[SmartVectors] Upload ID: {upload_id}")
+        print(f"[MotionVectors] Upload ID: {upload_id}")
 
         # ── Upload video ──────────────────────────────────────────────────────
         video_local, video_filename = _save_video_locally(video)
         video_key = None
         try:
             video_frame_count = _get_video_frame_count(video_local)
-            print(f"[SmartVectors] Video frame count: {video_frame_count}")
+            print(f"[MotionVectors] Video frame count: {video_frame_count}")
             if not video_frame_count:
                 raise ValueError(
                     f"Input video has no frames, Check input video."
                 )
             if video_frame_count > 3500:
                 raise ValueError(
-                    f"[SmartVectors] Input video should not exceed 3500 frames "
+                    f"[MotionVectors] Input video should not exceed 3500 frames "
                     f"(got {video_frame_count})."
                 )
             if has_mask and kf >= video_frame_count:
                 raise ValueError(
-                    f"[SmartVectors] Mask '{png_name}' targets frame "
+                    f"[MotionVectors] Mask '{png_name}' targets frame "
                     f"{kf} but the video only has "
                     f"{video_frame_count} frame(s). "
                     f"Valid range: 00000–{video_frame_count - 1:05d}.png."
                 )
-            _check_user_limit(api_key, video_frame_count, "SmartVectors")
+            _check_user_limit(api_key, video_frame_count, "MotionVectors")
 
             progress(f"Uploading video: {video_filename}...")
             upload_url, video_key = _get_presigned_upload_url(
@@ -1061,7 +1061,7 @@ class SlapshotSmartVectorsNode:
                 img = _Image.fromarray(arr, mode="RGB")
 
             fd, local_path = tempfile.mkstemp(suffix=f"_{png_name}", prefix="slapshot_roi_")
-            print(f"[SmartVectors] ROI mask: {png_name}, keyframe in metadata: {kf}")
+            print(f"[MotionVectors] ROI mask: {png_name}, keyframe in metadata: {kf}")
             os.close(fd)
             img.save(local_path)
 
@@ -1084,7 +1084,7 @@ class SlapshotSmartVectorsNode:
         if roi_metadata is not None:
             service["metadata"] = roi_metadata
 
-        result = _submit_and_poll(api_key, video_key, service, upload_id, unique_id, "SmartVectors")
+        result = _submit_and_poll(api_key, video_key, service, upload_id, unique_id, "MotionVectors")
         job_id = result["job_id"]
 
         return {
@@ -1103,11 +1103,11 @@ NODE_CLASS_MAPPINGS = {
     "Slapshot_Rotoscoping":    SlapshotRotoscopingNode,
     "Slapshot_Depth_Map":      SlapshotDepthMapNode,
     "Slapshot_Tracking":       SlapshotTrackingNode,
-    "Slapshot_Smart_Vectors":  SlapshotSmartVectorsNode,
+    "Slapshot_Motion_Vectors":  SlapshotMotionVectorsNode,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Slapshot_Rotoscoping":    "Slapshot — Rotoscoping",
     "Slapshot_Depth_Map":      "Slapshot — Depth Map",
     "Slapshot_Tracking":       "Slapshot — Tracking",
-    "Slapshot_Smart_Vectors":  "Slapshot — Smart Vectors",
+    "Slapshot_Motion_Vectors":  "Slapshot — Motion Vectors",
 }

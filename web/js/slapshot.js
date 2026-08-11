@@ -62,7 +62,7 @@ function _showApiKeyModal() {
     nodeLabel.textContent = "API Node(s)";
     nodeLabel.style.cssText = "color:#888;font-size:11px;margin-bottom:6px;";
     const nodeNames = document.createElement("div");
-    nodeNames.textContent = "Slapshot — Rotoscoping, Depth Map, Tracking, Smart Vectors";
+    nodeNames.textContent = "Slapshot — Rotoscoping, Depth Map, Tracking, Motion Vectors";
     nodeNames.style.cssText = "color:#ccc;font-size:13px;";
     nodeBox.appendChild(nodeLabel);
     nodeBox.appendChild(nodeNames);
@@ -147,7 +147,7 @@ const PREVIEW_NODES = [
     "Slapshot_Dynamic_Masks_Test",
     "Slapshot_Depth_Map",
     "Slapshot_Tracking",
-    "Slapshot_Smart_Vectors",
+    "Slapshot_Motion_Vectors",
 ];
 
 const DEFAULT_SLAPSHOT_BASE_URL = "https://autopilot.slapshot.ai";
@@ -181,8 +181,8 @@ const NODE_DOWNLOADS = {
     "Slapshot_Tracking":             [
         { label: "Download Tracking Data", exportType: "tracking" },
     ],
-    "Slapshot_Smart_Vectors":        [
-        { label: "Download Smart Vectors", exportType: "exr" },
+    "Slapshot_Motion_Vectors":        [
+        { label: "Download Motion Vectors", exportType: "exr" },
     ],
 };
 
@@ -322,7 +322,7 @@ app.registerExtension({
                     }
                 }
 
-                if (nodeData.name === "Slapshot_Smart_Vectors") {
+                if (nodeData.name === "Slapshot_Motion_Vectors") {
                     const roiInput = node.inputs?.find(inp => inp.name === "mask");
                     if (roiInput) roiInput.label = "ROI Mask";
                 }
