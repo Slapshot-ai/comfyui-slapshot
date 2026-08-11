@@ -78,9 +78,9 @@ Paste a job ID into the **job ID** field and click **Download Previous Job Resul
 
 ---
 
-### Slapshot — Smart Vectors
+### Slapshot — Motion Vectors
 
-Generates smart vector data from a source video with an optional single region of interest mask frame.
+Generates motion vector data from a source video with an optional single region of interest mask frame.
 
 **Inputs**
 
@@ -93,7 +93,7 @@ When provided, the ROI mask filename determines the keyframe automatically: `000
 
 **Download buttons (enabled after inference)**
 
-- **Download Smart Vectors** — downloads the smart vector results
+- **Download Motion Vectors** — downloads the motion vector results
 
 **Previous job download**
 
