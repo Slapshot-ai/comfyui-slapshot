@@ -437,6 +437,26 @@ def _headers(api_key: str) -> dict:
     }
 
 
+def _cancel_backend_job(base_url: str, api_key: str, job_id: str, log_prefix: str) -> None:
+    """Best-effort cancellation of a submitted backend job."""
+    url = f"{base_url}/api/jobs/{job_id}"
+    try:
+        resp = requests.delete(url, headers=_headers(api_key), timeout=REQUEST_TIMEOUT)
+    except requests.exceptions.RequestException as exc:
+        print(f"[{log_prefix}] Failed to cancel job {job_id}: {exc}")
+        return
+
+    if resp.status_code in (200, 202, 204, 404):
+        # 404 means it is already gone/finished; cancellation intent is satisfied.
+        print(f"[{log_prefix}] Cancel request sent for job {job_id} (status {resp.status_code}).")
+        return
+
+    print(
+        f"[{log_prefix}] Cancel request for job {job_id} returned "
+        f"{resp.status_code}: {resp.text[:300]}"
+    )
+
+
 def _check_user_limit(api_key: str, video_frame_count: int | None, log_prefix: str) -> None:
     """Raises ValueError if the user's free-tier frame limit is exceeded."""
     limit_url = f"{BASE_URL}/api/user/limit"
@@ -486,17 +506,35 @@ def _submit_and_poll(api_key: str, video_key: str, service_payload: dict,
     def progress(text: str):
         _send_progress(unique_id, text)
 
+    interrupt_check = None
+    try:
+        from comfy import model_management as _model_management
+        interrupt_check = getattr(_model_management, "throw_exception_if_processing_interrupted", None)
+    except Exception:
+        interrupt_check = None
+
+    def _raise_if_interrupted_pre_submit() -> None:
+        if interrupt_check is None:
+            return
+        try:
+            interrupt_check()
+        except BaseException:
+            progress("Job cancelled.")
+            raise
+
     submit_url = f"{BASE_URL}/api/jobs"
     payload = {
         "assets": [{"source_path": video_key, "services": [service_payload]}],
         "job_source": JOB_SOURCE,
     }
     
+    _raise_if_interrupted_pre_submit()
     progress("Submitting job...")
     print(f"[{log_prefix}] Payload: {json.dumps(payload, indent=2)}")
 
     resp = None
     try:
+        _raise_if_interrupted_pre_submit()
         resp = requests.post(submit_url, json=payload, headers=_headers(api_key),
                              timeout=REQUEST_TIMEOUT)
         print(f"[{log_prefix}] Submission response: {resp.status_code} {resp.text[:300]}")
@@ -529,6 +567,7 @@ def _submit_and_poll(api_key: str, video_key: str, service_payload: dict,
         pbar = None
 
     done_event = threading.Event()
+    stop_event = threading.Event()
     result_box: dict = {}
 
     def _poll():
@@ -536,7 +575,8 @@ def _submit_and_poll(api_key: str, video_key: str, service_payload: dict,
         poll_start = time.monotonic()
 
         while True:
-            time.sleep(POLL_INTERVAL_SECONDS)
+            if stop_event.wait(POLL_INTERVAL_SECONDS):
+                return
             poll_num += 1
 
             if time.monotonic() - poll_start > MAX_POLL_SECONDS:
@@ -588,6 +628,8 @@ def _submit_and_poll(api_key: str, video_key: str, service_payload: dict,
 
             if total > 0 and pending == 0 and running == 0:
                 if completed == 0:
+                    if cancelled > 0:
+                        progress("Job cancelled.")
                     result_box["error"] = RuntimeError(
                         f"[{log_prefix}] Inference failed — "
                         f"{failed} failed, {cancelled} cancelled out of {total}."
@@ -606,8 +648,28 @@ def _submit_and_poll(api_key: str, video_key: str, service_payload: dict,
     t = threading.Thread(target=_poll, daemon=True)
     t.start()
 
-    while not done_event.wait(timeout=5):
-        pass
+    cancel_sent = False
+
+    def _cancel_job_once() -> None:
+        nonlocal cancel_sent
+        if cancel_sent:
+            return
+        cancel_sent = True
+        progress("Cancellation requested. Cancelling remote job...")
+        _cancel_backend_job(BASE_URL, api_key, job_id, log_prefix)
+
+    try:
+        while not done_event.wait(timeout=5):
+            if interrupt_check is not None:
+                # ComfyUI raises here when the user cancels the run/job.
+                interrupt_check()
+    except BaseException:
+        stop_event.set()
+        _cancel_job_once()
+        progress("Job cancelled.")
+        raise
+    finally:
+        stop_event.set()
 
     if "error" in result_box:
         raise result_box["error"]
@@ -648,6 +710,20 @@ class SlapshotRotoscopingNode:
 
         def progress(text: str):
             _send_progress(unique_id, text)
+
+        def _raise_if_interrupted_before_mask_upload() -> None:
+            try:
+                from comfy import model_management as _model_management
+                interrupt_check = getattr(_model_management, "throw_exception_if_processing_interrupted", None)
+            except Exception:
+                interrupt_check = None
+            if interrupt_check is None:
+                return
+            try:
+                interrupt_check()
+            except BaseException:
+                progress("Job cancelled.")
+                raise
 
         # Collect connected IMAGE tensors paired with their original filenames.
         # _mask_filename_from_prompt walks the workflow graph to find the filename
@@ -714,11 +790,13 @@ class SlapshotRotoscopingNode:
         references = []
         total_masks = len(mask_inputs)
         for upload_num, (tensor, frame_number, png_name) in enumerate(mask_inputs, start=1):
+            _raise_if_interrupted_before_mask_upload()
             frame = next(_iter_image_frames(tensor))
             local_path, _ = _save_mask_to_tempfile(frame, frame_number)
             try:
                 progress(f"Uploading mask {upload_num}/{total_masks}: {png_name}...")
                 upload_url, mask_key = _get_presigned_upload_url(BASE_URL, api_key, upload_id, "mask", png_name)
+                _raise_if_interrupted_before_mask_upload()
                 _upload_to_presigned_url(upload_url, local_path)
                 references.append(mask_key)
             finally:
@@ -1005,6 +1083,20 @@ class SlapshotMotionVectorsNode:
         def progress(text: str):
             _send_progress(unique_id, text)
 
+        def _raise_if_interrupted_before_mask_upload() -> None:
+            try:
+                from comfy import model_management as _model_management
+                interrupt_check = getattr(_model_management, "throw_exception_if_processing_interrupted", None)
+            except Exception:
+                interrupt_check = None
+            if interrupt_check is None:
+                return
+            try:
+                interrupt_check()
+            except BaseException:
+                progress("Job cancelled.")
+                raise
+
         upload_id = str(uuid.uuid4())
         print(f"[MotionVectors] Upload ID: {upload_id}")
 
@@ -1047,6 +1139,7 @@ class SlapshotMotionVectorsNode:
         # ── Upload ROI mask if provided ───────────────────────────────────────
         roi_metadata = None
         if has_mask:
+            _raise_if_interrupted_before_mask_upload()
             frame = next(_iter_image_frames(mask))
 
             import numpy as np
@@ -1070,6 +1163,7 @@ class SlapshotMotionVectorsNode:
                 upload_url, mask_key = _get_presigned_upload_url(
                     BASE_URL, api_key, upload_id, "mask", png_name
                 )
+                _raise_if_interrupted_before_mask_upload()
                 _upload_to_presigned_url(upload_url, local_path)
                 roi_metadata = {"roi_mask_path": mask_key, "keyframe": kf}
                 progress("ROI mask uploaded ✓")
